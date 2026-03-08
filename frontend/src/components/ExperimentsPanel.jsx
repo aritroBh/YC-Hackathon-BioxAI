@@ -164,6 +164,43 @@ function isLiteratureNode(node) {
   return Boolean(node) && node.source_type !== "private_csv";
 }
 
+function isExperimentCandidate(node) {
+  return Boolean(node) && (
+    (node.friction_score ?? 0) >= 0.6
+    || node.debate_state === "critical"
+    || node.debate_state === "contradiction"
+  );
+}
+
+function resolveExperimentNodes(node, nodes) {
+  if (!node) {
+    return { privateNode: null, litNode: null };
+  }
+
+  const contradictionIdSet = new Set(node.contradicting_node_ids || []);
+  const contradictionCandidates = nodes.filter((candidate) => contradictionIdSet.has(candidate.node_id));
+  const rankedCandidates = [...contradictionCandidates].sort((left, right) => (
+    (right.friction_score ?? 0) - (left.friction_score ?? 0)
+    || (right.citation_count ?? 0) - (left.citation_count ?? 0)
+  ));
+  const bestContradictingNode = rankedCandidates.find((candidate) => (
+    isPrivateNode(candidate) !== isPrivateNode(node)
+  )) || rankedCandidates[0] || null;
+
+  return {
+    privateNode: isPrivateNode(node)
+      ? node
+      : isPrivateNode(bestContradictingNode)
+        ? bestContradictingNode
+        : null,
+    litNode: isLiteratureNode(node)
+      ? node
+      : isLiteratureNode(bestContradictingNode)
+        ? bestContradictingNode
+        : null,
+  };
+}
+
 function hillCurveValue(ic50, concentration) {
   if (!Number.isFinite(ic50) || ic50 <= 0) {
     return null;
@@ -312,36 +349,48 @@ export default function ExperimentsPanel({
   const [nextStepsLoading, setNextStepsLoading] = useState(false);
   const [history, setHistory] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [focusNode, setFocusNode] = useState(null);
+  const [privateNode, setPrivateNode] = useState(null);
+  const [litNode, setLitNode] = useState(null);
   const logRef = useRef(null);
 
-  const contradictionCandidates = useMemo(
-    () => (selectedNode?.contradicting_node_ids || [])
-      .map((nodeId) => nodes.find((node) => node.node_id === nodeId))
-      .filter(Boolean),
-    [nodes, selectedNode],
-  );
+  useEffect(() => {
+    const handler = (event) => {
+      const node = event.detail?.node;
+      if (!node) {
+        return;
+      }
 
-  const contradictingNode = useMemo(() => {
+      const resolvedNodes = resolveExperimentNodes(node, nodes);
+      setFocusNode(node);
+      setPrivateNode(resolvedNodes.privateNode);
+      setLitNode(resolvedNodes.litNode);
+    };
+
+    window.addEventListener("dialectic:select-experiment-node", handler);
+    return () => window.removeEventListener("dialectic:select-experiment-node", handler);
+  }, [nodes]);
+
+  useEffect(() => {
     if (!selectedNode) {
-      return null;
+      setFocusNode(null);
+      setPrivateNode(null);
+      setLitNode(null);
+      return;
     }
 
-    return contradictionCandidates.find((node) => isPrivateNode(node) !== isPrivateNode(selectedNode))
-      || contradictionCandidates[0]
-      || null;
-  }, [contradictionCandidates, selectedNode]);
+    const resolvedNodes = resolveExperimentNodes(selectedNode, nodes);
+    if (resolvedNodes.privateNode || resolvedNodes.litNode || isExperimentCandidate(selectedNode)) {
+      setFocusNode(selectedNode);
+      setPrivateNode(resolvedNodes.privateNode);
+      setLitNode(resolvedNodes.litNode);
+      return;
+    }
 
-  const privateNode = isPrivateNode(selectedNode)
-    ? selectedNode
-    : isPrivateNode(contradictingNode)
-      ? contradictingNode
-      : null;
-
-  const litNode = isLiteratureNode(selectedNode)
-    ? selectedNode
-    : isLiteratureNode(contradictingNode)
-      ? contradictingNode
-      : null;
+    setFocusNode(null);
+    setPrivateNode(null);
+    setLitNode(null);
+  }, [nodes, selectedNode]);
 
   const visibleHistory = useMemo(
     () => history.filter((run) => run.nodeAId === privateNode?.node_id && run.nodeBId === litNode?.node_id),
@@ -858,6 +907,8 @@ cell lines, and what the structural data suggests.`,
     { stage: "DiffDock", friction: results.friction_timeline?.[3] || 0.85 },
   ] : [];
 
+  const isRunning = running;
+  const hasExperimentFocus = Boolean(focusNode);
   const hasContradiction = Boolean(privateNode && litNode);
 
   return (
@@ -865,7 +916,7 @@ cell lines, and what the structural data suggests.`,
       <div style={s.header}>⬡ Experiment Runner</div>
       <div style={s.sub}>Compare private assay data against published protocols via DiffDock + SurfDock</div>
 
-      {!hasContradiction ? (
+      {!hasExperimentFocus ? (
         <div style={s.emptyState}>
           <div style={{ fontSize: 18, marginBottom: 8 }}>⬡</div>
           <div>Select a contradicted node on the map</div>
@@ -980,15 +1031,31 @@ cell lines, and what the structural data suggests.`,
             <div style={{ display: "flex", gap: 8, alignItems: "stretch", marginBottom: 12 }}>
               <div style={s.nodeCard}>
                 <div style={s.badge("77,124,255")}>◼ Private</div>
-                <div style={{ color: "#e8eaf0", marginBottom: 4 }}>
-                  {privateNode.subject_name || "Unknown compound"}
-                </div>
-                <div style={{ color: "#6b7590", fontSize: 10 }}>
-                  IC50: {formatMeasurement(privateNode)}
-                </div>
-                <div style={{ color: "#6b7590", fontSize: 10 }}>
-                  Cell: {privateNode.cell_line || "—"}
-                </div>
+                {privateNode ? (
+                  <>
+                    <div style={{ color: "#e8eaf0", marginBottom: 4 }}>
+                      {privateNode.subject_name || "Unknown compound"}
+                    </div>
+                    <div style={{ color: "#6b7590", fontSize: 10 }}>
+                      IC50: {formatMeasurement(privateNode)}
+                    </div>
+                    <div style={{ color: "#6b7590", fontSize: 10 }}>
+                      Cell: {privateNode.cell_line || "—"}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ color: "#e8eaf0", marginBottom: 4 }}>
+                      No private assay match
+                    </div>
+                    <div style={{ color: "#6b7590", fontSize: 10 }}>
+                      Selected node: {focusNode?.subject_name || "Unknown compound"}
+                    </div>
+                    <div style={{ color: "#6b7590", fontSize: 10 }}>
+                      Friction: {formatFixed(focusNode?.friction_score)}
+                    </div>
+                  </>
+                )}
               </div>
               <div style={s.vsDiv}>
                 <div>—</div>
@@ -997,51 +1064,91 @@ cell lines, and what the structural data suggests.`,
               </div>
               <div style={s.nodeCard}>
                 <div style={s.badge("0,229,160")}>◉ Literature</div>
-                <div style={{ color: "#e8eaf0", marginBottom: 4 }}>
-                  {litNode.subject_name || "Unknown compound"}
-                </div>
-                <div style={{ color: "#6b7590", fontSize: 10 }}>
-                  IC50: {formatMeasurement(litNode)}
-                </div>
-                <div style={{ color: "#6b7590", fontSize: 10 }}>
-                  {litNode.citation_count || 0} citations
-                </div>
+                {litNode ? (
+                  <>
+                    <div style={{ color: "#e8eaf0", marginBottom: 4 }}>
+                      {litNode.subject_name || "Unknown compound"}
+                    </div>
+                    <div style={{ color: "#6b7590", fontSize: 10 }}>
+                      IC50: {formatMeasurement(litNode)}
+                    </div>
+                    <div style={{ color: "#6b7590", fontSize: 10 }}>
+                      {litNode.citation_count || 0} citations
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ color: "#e8eaf0", marginBottom: 4 }}>
+                      No literature match
+                    </div>
+                    <div style={{ color: "#6b7590", fontSize: 10 }}>
+                      Debate state: {focusNode?.debate_state || "—"}
+                    </div>
+                    <div style={{ color: "#6b7590", fontSize: 10 }}>
+                      IC50: {formatMeasurement(focusNode)}
+                    </div>
+                  </>
+                )}
               </div>
             </div>
 
-            <button
-              type="button"
-              style={{ ...s.dirBtn("#4d7cff"), opacity: running ? 0.65 : 1 }}
-              disabled={running}
-              onClick={() => runExperiment("a")}
-            >
-              ▶ Run My Data → Their Protocol
-              <div style={{ color: "#6b7590", fontSize: 9, marginTop: 2 }}>
-                DiffDock: {privateNode.subject_name} in {litNode.cell_line || "their conditions"}
+            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+              <button
+                type="button"
+                onClick={() => runExperiment("a")}
+                disabled={isRunning || !privateNode || !litNode}
+                style={{
+                  flex: 1,
+                  background: isRunning ? "rgba(0,229,160,0.05)" : "rgba(0,229,160,0.08)",
+                  border: "1px solid rgba(0,229,160,0.4)",
+                  color: "#00e5a0",
+                  fontFamily: "'DM Mono', monospace",
+                  fontSize: 10,
+                  padding: "10px 8px",
+                  cursor: isRunning || !privateNode || !litNode ? "not-allowed" : "pointer",
+                  lineHeight: 1.5,
+                  textAlign: "center",
+                  opacity: privateNode && litNode ? 1 : 0.45,
+                }}
+              >
+                ▶ Our Data
+                <br />
+                <span style={{ color: "#6b7590", fontSize: 9 }}>
+                  → Their Protocol
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => runExperiment("b")}
+                disabled={isRunning || !privateNode || !litNode}
+                style={{
+                  flex: 1,
+                  background: isRunning ? "rgba(255,179,64,0.05)" : "rgba(255,179,64,0.08)",
+                  border: "1px solid rgba(255,179,64,0.4)",
+                  color: "#ffb340",
+                  fontFamily: "'DM Mono', monospace",
+                  fontSize: 10,
+                  padding: "10px 8px",
+                  cursor: isRunning || !privateNode || !litNode ? "not-allowed" : "pointer",
+                  lineHeight: 1.5,
+                  textAlign: "center",
+                  opacity: privateNode && litNode ? 1 : 0.45,
+                }}
+              >
+                ▶ Their Data
+                <br />
+                <span style={{ color: "#6b7590", fontSize: 9 }}>
+                  → Our Protocol
+                </span>
+              </button>
+            </div>
+
+            {!hasContradiction ? (
+              <div style={{ color: "#6b7590", fontSize: 10 }}>
+                A matched private/literature contradiction is required before running the swap experiment.
               </div>
-            </button>
-            <button
-              type="button"
-              style={{ ...s.dirBtn("#00e5a0"), opacity: running ? 0.65 : 1 }}
-              disabled={running}
-              onClick={() => runExperiment("b")}
-            >
-              ▶ Run Their Data → My Protocol
-              <div style={{ color: "#6b7590", fontSize: 9, marginTop: 2 }}>
-                DiffDock: {litNode.subject_name} in {privateNode.cell_line || "my conditions"}
-              </div>
-            </button>
-            <button
-              type="button"
-              style={{ ...s.dirBtn("#ffb340"), opacity: running ? 0.65 : 1, marginBottom: 0 }}
-              disabled={running}
-              onClick={() => runExperiment("both")}
-            >
-              ▶▶ Run Both — Full Comparison
-              <div style={{ color: "#6b7590", fontSize: 9, marginTop: 2 }}>
-                DiffDock (live ~2 min) + SurfDock (background ~20 min)
-              </div>
-            </button>
+            ) : null}
           </div>
 
           {logs.length > 0 ? (

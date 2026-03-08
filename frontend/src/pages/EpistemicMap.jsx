@@ -106,6 +106,16 @@ export default function EpistemicMap() {
         ? currentIds.filter((id) => id !== node.node_id)
         : [...currentIds, node.node_id]
     ));
+
+    if (
+      (node?.friction_score ?? 0) >= 0.6
+      || node?.debate_state === "critical"
+      || node?.debate_state === "contradiction"
+    ) {
+      window.dispatchEvent(new CustomEvent("dialectic:select-experiment-node", {
+        detail: { node },
+      }));
+    }
   }, []);
 
   const handleMultiSelect = useCallback((ids) => {
