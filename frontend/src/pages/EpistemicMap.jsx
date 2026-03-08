@@ -27,6 +27,7 @@ export default function EpistemicMap() {
   const [showCriticalOnly, setShowCriticalOnly] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [viewMode, setViewMode] = useState("2D");
+  const [oracleQuery, setOracleQuery] = useState("");
   const [leftWidth, setLeftWidth] = useState(160);
   const [rightWidth, setRightWidth] = useState(280);
   const [scoutHighlightIds, setScoutHighlightIds] = useState([]);
@@ -77,6 +78,15 @@ export default function EpistemicMap() {
 
     window.addEventListener("dialectic:open-tab", handler);
     return () => window.removeEventListener("dialectic:open-tab", handler);
+  }, []);
+
+  useEffect(() => {
+    const handler = (event) => {
+      setOracleQuery(event.detail?.query || "");
+    };
+
+    window.addEventListener("dialectic:oracle-query", handler);
+    return () => window.removeEventListener("dialectic:oracle-query", handler);
   }, []);
 
   const nodeMap = useMemo(
@@ -149,6 +159,22 @@ export default function EpistemicMap() {
     setActiveBagId(id);
     setRightTab("bags");
   }, []);
+
+  useEffect(() => {
+    const handler = (event) => {
+      const { name, nodeIds } = event.detail || {};
+      const bagNodeIds = nodes
+        .filter((node) => (nodeIds || []).includes(node.node_id))
+        .map((node) => node.node_id);
+
+      if (bagNodeIds.length > 0) {
+        handleCreateBag(bagNodeIds, name || `Bag ${bags.length + 1}`);
+      }
+    };
+
+    window.addEventListener("dialectic:create-bag", handler);
+    return () => window.removeEventListener("dialectic:create-bag", handler);
+  }, [bags.length, handleCreateBag, nodes]);
 
   const handleDeleteBag = useCallback((id) => {
     setBags((currentBags) => currentBags.filter((bag) => bag.id !== id));
@@ -259,6 +285,27 @@ export default function EpistemicMap() {
     () => selectedIds.map((id) => nodeMap[id]).filter(Boolean),
     [nodeMap, selectedIds],
   );
+
+  useEffect(() => {
+    if (rightTab !== "oracle" || !oracleQuery) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      const textarea = document.querySelector("textarea");
+      if (!(textarea instanceof HTMLTextAreaElement)) {
+        return;
+      }
+
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
+      setter?.call(textarea, oracleQuery);
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      textarea.focus();
+      setOracleQuery("");
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [oracleQuery, rightTab]);
 
   const isStackedLayout = viewportWidth < 1180;
 
