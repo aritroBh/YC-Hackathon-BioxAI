@@ -1305,20 +1305,6 @@ cell lines, and what the structural data suggests.`,
                 </button>
                 <button
                   type="button"
-                  style={{
-                    ...s.exportBtn,
-                    borderColor: "rgba(0,180,120,0.4)",
-                    color: "#00b478",
-                  }}
-                  onClick={() => window.open(
-                    "https://app.biorender.com/biorender-templates?search=KRAS+signaling",
-                    "_blank",
-                  )}
-                >
-                  🎨 BioRender Pathway
-                </button>
-                <button
-                  type="button"
                   style={s.exportBtn}
                   onClick={() => {
                     const bagName = `${privateNode?.subject_name} vs ${litNode?.subject_name?.slice(0, 20)} Experiment`;
