@@ -39,6 +39,58 @@ Rules:
 - severity critical = friction >= 0.85, high = friction >= 0.6, medium = rest
 - Find patterns a human would miss by reading nodes one at a time`;
 
+const VISION_SYSTEM_PROMPT = `You are the Dialectic Scout Agent analyzing
+a screenshot of a biological epistemic map.
+
+Each dot on the map is a biological claim. Colors mean:
+- Red/orange dots = high contradiction (friction >= 0.6)
+- Purple dots = inhibitory claims
+- Cyan/teal dots = activating claims
+- Green dots = consensus nodes
+- Dashed lines between dots = contradictions
+- Constellation lines = cluster membership
+
+Find visual patterns the data analysis might miss:
+- Unusual spatial clustering or isolation
+- Visual "bridges" between clusters (nodes connecting two groups)
+- Dense red zones indicating contradiction hotspots
+- Lone outlier nodes far from any cluster
+- Asymmetric clusters (one side red, other side green)
+- Any other visually striking pattern
+
+Return ONLY valid JSON, no preamble, no markdown:
+{
+  "visual_findings": [
+    {
+      "id": "visual-1",
+      "type": "spatial_cluster" | "bridge_node" | "outlier" | "hotspot" | "asymmetric_cluster" | "visual_anomaly",
+      "severity": "critical" | "high" | "medium",
+      "title": "short title max 8 words",
+      "description": "2 sentences: what you see visually and what it means scientifically",
+      "map_region": "top-left" | "top-right" | "bottom-left" | "bottom-right" | "center" | "edge",
+      "approximate_node_count": number,
+      "action": "what to investigate next"
+    }
+  ],
+  "visual_summary": "1 sentence describing the overall visual shape and health of the map",
+  "most_striking_visual": "the single most visually unusual thing you see"
+}
+
+Be specific about what you see — colors, positions, density, shapes.
+Return 2-4 visual findings.`;
+
+const severityOrder = {
+  critical: 0,
+  high: 1,
+  medium: 2,
+};
+
+const severityColor = {
+  critical: "#ff3050",
+  high: "#ff8c00",
+  medium: "#c8e600",
+};
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function parseScoutPayload(text) {
@@ -53,10 +105,12 @@ export default function ScoutAgent({
   onCreateBag,
   onRunDiffDock,
   onSelectNode,
+  mapCanvasRef,
 }) {
   const [status, setStatus] = useState("idle");
   const [findings, setFindings] = useState([]);
   const [summary, setSummary] = useState("");
+  const [visionSummary, setVisionSummary] = useState("");
   const [topRisk, setTopRisk] = useState("");
   const [nextStep, setNextStep] = useState("");
   const [scanCount, setScanCount] = useState(0);
@@ -80,6 +134,71 @@ export default function ScoutAgent({
     setStatus("paused");
   }, []);
 
+  const runVisionScan = useCallback(async (signal) => {
+    if (!mapCanvasRef?.current) {
+      addLog("◌ No canvas ref — skipping vision scan.");
+      return { visual_findings: [] };
+    }
+
+    addLog("► Pass 2: Capturing map screenshot for vision analysis...");
+
+    try {
+      const canvas = mapCanvasRef.current;
+      const imageData = canvas.toDataURL("image/png");
+      const base64 = imageData.split(",")[1];
+
+      addLog("► Sending map image to Claude Vision...");
+
+      const response = await fetch(ANTHROPIC_API_URL, {
+        method: "POST",
+        signal,
+        headers: {
+          "Content-Type": "application/json",
+          "anthropic-version": "2023-06-01",
+          "x-api-key": ANTHROPIC_API_KEY,
+        },
+        body: JSON.stringify({
+          model: ANTHROPIC_MODEL,
+          max_tokens: 1000,
+          system: VISION_SYSTEM_PROMPT,
+          messages: [{
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/png",
+                  data: base64,
+                },
+              },
+              {
+                type: "text",
+                text: "Analyze this biological epistemic map screenshot. Find visual cluster patterns, outliers, and anomalies that raw data analysis would miss.",
+              },
+            ],
+          }],
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+
+      const data = await response.json();
+      const parsed = parseScoutPayload(data.content?.[0]?.text || "{}");
+      addLog(`✓ Vision found ${parsed.visual_findings?.length || 0} visual patterns.`);
+      return parsed;
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        throw error;
+      }
+
+      addLog(`✗ Vision scan failed: ${error.message}`);
+      return { visual_findings: [] };
+    }
+  }, [addLog, mapCanvasRef]);
+
   const runScan = useCallback(async (customInstructions = "") => {
     if (!nodes?.length) {
       return;
@@ -94,6 +213,7 @@ export default function ScoutAgent({
     isPaused.current = false;
     setStatus("scanning");
     setExpandedFinding(null);
+    setVisionSummary("");
     onHighlightNodes?.([], "#ffb340");
     addLog("► Scout scan initiated...");
 
@@ -120,7 +240,7 @@ export default function ScoutAgent({
         throw new Error("Missing VITE_ANTHROPIC_API_KEY.");
       }
 
-      addLog("► Calling Claude for pattern analysis...");
+      addLog(`► Pass 1: Analyzing ${nodes.length} nodes...`);
       const response = await fetch(ANTHROPIC_API_URL, {
         method: "POST",
         signal: controller.signal,
@@ -153,15 +273,45 @@ export default function ScoutAgent({
         return;
       }
 
-      const nextFindings = Array.isArray(parsed.findings) ? parsed.findings.slice(0, 5) : [];
-      const flaggedIds = [...new Set(nextFindings.flatMap((finding) => finding.node_ids || []).filter(Boolean))];
+      const dataFindings = Array.isArray(parsed.findings) ? parsed.findings.slice(0, 5) : [];
+      addLog(`✓ Found ${dataFindings.length} data patterns.`);
+      addLog("► Pass 1 complete (data analysis). Starting Pass 2 (vision)...");
 
-      setFindings(nextFindings);
+      const visionResult = await runVisionScan(controller.signal);
+
+      if (scanTokenRef.current !== currentScanToken) {
+        return;
+      }
+
+      if (isPaused.current) {
+        finalizePausedState();
+        return;
+      }
+
+      const visualFindings = (visionResult.visual_findings || []).map((finding, index) => ({
+        ...finding,
+        id: finding.id || `visual-${Date.now()}-${index}`,
+        node_ids: [],
+        suggested_bag_name: null,
+        run_diffdock: false,
+        source: "vision",
+      }));
+
+      const allFindings = [
+        ...dataFindings.map((finding) => ({ ...finding, source: "data" })),
+        ...visualFindings,
+      ].sort((left, right) => (
+        (severityOrder[left.severity] ?? 3) - (severityOrder[right.severity] ?? 3)
+      ));
+
+      const flaggedIds = [...new Set(allFindings.flatMap((finding) => finding.node_ids || []).filter(Boolean))];
+
+      setFindings(allFindings);
       setSummary(parsed.summary || "");
-      setTopRisk(parsed.top_risk || "");
+      setTopRisk(parsed.top_risk || visionResult.most_striking_visual || "");
       setNextStep(parsed.scientist_next_step || "");
+      setVisionSummary(visionResult.visual_summary || "");
       setScanCount((count) => count + 1);
-      addLog(`✓ Found ${nextFindings.length} patterns.`);
 
       if (flaggedIds.length > 0 && onHighlightNodes) {
         onHighlightNodes(flaggedIds, "#ffb340");
@@ -177,7 +327,7 @@ export default function ScoutAgent({
         return;
       }
 
-      for (const finding of nextFindings) {
+      for (const finding of allFindings) {
         if (scanTokenRef.current !== currentScanToken) {
           return;
         }
@@ -194,7 +344,7 @@ export default function ScoutAgent({
         }
       }
 
-      for (const finding of nextFindings) {
+      for (const finding of allFindings) {
         if (scanTokenRef.current !== currentScanToken) {
           return;
         }
@@ -241,7 +391,16 @@ export default function ScoutAgent({
         abortRef.current = null;
       }
     }
-  }, [addLog, finalizePausedState, nodes, onCreateBag, onHighlightNodes, onRunDiffDock, sessionId]);
+  }, [
+    addLog,
+    finalizePausedState,
+    nodes,
+    onCreateBag,
+    onHighlightNodes,
+    onRunDiffDock,
+    runVisionScan,
+    sessionId,
+  ]);
 
   const handlePause = () => {
     isPaused.current = true;
@@ -274,12 +433,6 @@ export default function ScoutAgent({
     setTakeoverInstructions("");
     setStatus(findings.length > 0 ? "active" : "idle");
     addLog("► Resumed autonomous mode.");
-  };
-
-  const severityColor = {
-    critical: "#ff3050",
-    high: "#ff8c00",
-    medium: "#c8e600",
   };
 
   const isActive = status === "active";
@@ -447,9 +600,12 @@ export default function ScoutAgent({
             background: "rgba(255,179,64,0.03)",
             borderBottom: "1px solid #1e2430",
             fontFamily: "'DM Mono',monospace",
+            lineHeight: 1.5,
           }}
         >
-          ◈ Scanning {nodes?.length || 0} nodes for patterns...
+          ◈ Pass 1: Analyzing {nodes?.length || 0} nodes...
+          <br />
+          then Pass 2: Claude Vision map analysis
         </div>
       ) : null}
 
@@ -559,6 +715,22 @@ export default function ScoutAgent({
         </div>
       ) : null}
 
+      {visionSummary ? (
+        <div
+          style={{
+            padding: "5px 10px",
+            fontSize: 9,
+            color: "#4d7cff",
+            borderBottom: "1px solid #1e2430",
+            fontFamily: "'DM Mono',monospace",
+            lineHeight: 1.5,
+            background: "rgba(77,124,255,0.03)",
+          }}
+        >
+          👁 Visual: {visionSummary}
+        </div>
+      ) : null}
+
       {hasTakeoverFocus && isActive ? (
         <div
           style={{
@@ -615,7 +787,7 @@ export default function ScoutAgent({
                   gap: 6,
                 }}
               >
-                <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0 }}>
                   <div
                     style={{
                       width: 5,
@@ -635,17 +807,52 @@ export default function ScoutAgent({
                     {finding.title}
                   </span>
                 </div>
-                <span
-                  style={{
-                    fontSize: 8,
-                    color: severityColor[finding.severity] || "#6b7590",
-                    textTransform: "uppercase",
-                    letterSpacing: 1,
-                    flexShrink: 0,
-                  }}
-                >
-                  {finding.severity}
-                </span>
+                <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+                  <span
+                    style={{
+                      fontSize: 8,
+                      color: severityColor[finding.severity] || "#6b7590",
+                      textTransform: "uppercase",
+                      letterSpacing: 1,
+                    }}
+                  >
+                    {finding.severity}
+                  </span>
+                  {finding.source === "vision" ? (
+                    <span
+                      style={{
+                        fontSize: 7,
+                        color: "#4d7cff",
+                        background: "rgba(77,124,255,0.1)",
+                        border: "1px solid rgba(77,124,255,0.2)",
+                        padding: "1px 4px",
+                        letterSpacing: 1,
+                        textTransform: "uppercase",
+                        marginLeft: 4,
+                        flexShrink: 0,
+                      }}
+                    >
+                      👁 Vision
+                    </span>
+                  ) : null}
+                  {finding.source === "data" ? (
+                    <span
+                      style={{
+                        fontSize: 7,
+                        color: "#6b7590",
+                        background: "rgba(100,100,100,0.1)",
+                        border: "1px solid rgba(100,100,100,0.2)",
+                        padding: "1px 4px",
+                        letterSpacing: 1,
+                        textTransform: "uppercase",
+                        marginLeft: 4,
+                        flexShrink: 0,
+                      }}
+                    >
+                      ◈ Data
+                    </span>
+                  ) : null}
+                </div>
               </div>
 
               {expandedFinding === index ? (
@@ -677,7 +884,9 @@ export default function ScoutAgent({
                       marginBottom: 8,
                     }}
                   >
-                    {finding.node_ids?.length || 0} nodes · bag: "{finding.suggested_bag_name}"
+                    {finding.source === "vision"
+                      ? `${finding.map_region || "region unknown"} · approx ${finding.approximate_node_count ?? "?"} nodes`
+                      : `${finding.node_ids?.length || 0} nodes · bag: "${finding.suggested_bag_name}"`}
                     {finding.run_diffdock ? (
                       <span style={{ color: "#ffb340", marginLeft: 6 }}>
                         ⬡ DiffDock queued
@@ -700,8 +909,10 @@ export default function ScoutAgent({
                         fontSize: 9,
                         fontFamily: "'DM Mono',monospace",
                         padding: "3px 8px",
-                        cursor: "pointer",
+                        cursor: finding.node_ids?.[0] ? "pointer" : "default",
+                        opacity: finding.node_ids?.[0] ? 1 : 0.45,
                       }}
+                      disabled={!finding.node_ids?.[0]}
                     >
                       Investigate →
                     </button>
@@ -720,8 +931,10 @@ export default function ScoutAgent({
                         fontSize: 9,
                         fontFamily: "'DM Mono',monospace",
                         padding: "3px 8px",
-                        cursor: "pointer",
+                        cursor: finding.node_ids?.length > 0 ? "pointer" : "default",
+                        opacity: finding.node_ids?.length > 0 ? 1 : 0.45,
                       }}
+                      disabled={!finding.node_ids?.length}
                     >
                       Highlight
                     </button>

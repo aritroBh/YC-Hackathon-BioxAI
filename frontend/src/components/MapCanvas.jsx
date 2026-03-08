@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const TOOLS = [
   { id: "select", icon: "\u25B6", label: "Select" },
@@ -711,7 +711,7 @@ function drawMarkers(ctx, markers, projectPoint, canvas) {
   });
 }
 
-export default function MapCanvas({
+const MapCanvas = forwardRef(function MapCanvas({
   nodes = [],
   allNodes = nodes,
   selectedIds = [],
@@ -722,7 +722,7 @@ export default function MapCanvas({
   onMultiSelect,
   onHoverNode,
   onNodeInspect,
-}) {
+}, ref) {
   const wrapperRef = useRef(null);
   const canvasRef = useRef(null);
   const minimapRef = useRef(null);
@@ -743,6 +743,19 @@ export default function MapCanvas({
   const [markerInput, setMarkerInput] = useState(null);
   const [lassoPoints, setLassoPoints] = useState([]);
   const [isDraggingVisual, setIsDraggingVisual] = useState(false);
+
+  const handleCanvasRef = useCallback((element) => {
+    canvasRef.current = element;
+
+    if (typeof ref === "function") {
+      ref(element);
+      return;
+    }
+
+    if (ref) {
+      ref.current = element;
+    }
+  }, [ref]);
 
   const renderableNodes = useMemo(
     () => nodes.filter(isRenderableNode),
@@ -1448,7 +1461,7 @@ export default function MapCanvas({
       }}
     >
       <canvas
-        ref={canvasRef}
+        ref={handleCanvasRef}
         style={{
           width: "100%",
           height: "100%",
@@ -1723,4 +1736,6 @@ export default function MapCanvas({
       )}
     </div>
   );
-}
+});
+
+export default MapCanvas;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { getSessionNodes } from "../api/client";
@@ -29,6 +29,7 @@ export default function EpistemicMap() {
   const [viewMode, setViewMode] = useState("2D");
   const [scoutHighlightIds, setScoutHighlightIds] = useState([]);
   const [scoutHighlightColor, setScoutHighlightColor] = useState("#ffb340");
+  const mapCanvasRef = useRef(null);
   const [viewportWidth, setViewportWidth] = useState(
     typeof window !== "undefined" ? window.innerWidth : 1440,
   );
@@ -418,6 +419,7 @@ export default function EpistemicMap() {
             onCreateBag={handleScoutCreateBag}
             onRunDiffDock={handleScoutRunDiffDock}
             onSelectNode={handleScoutSelectNode}
+            mapCanvasRef={mapCanvasRef}
           />
         </div>
 
@@ -651,6 +653,7 @@ export default function EpistemicMap() {
         </div>
 
         <MapCanvas
+          ref={mapCanvasRef}
           nodes={visibleNodes}
           allNodes={nodes}
           selectedIds={selectedIds}
