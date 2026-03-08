@@ -1,0 +1,21 @@
+Gene,Mutation,Compound,IC50_nM,Cell_Line,Assay_Type,Notes
+KRAS,G12C,AMG-510,0.18,NCI-H358,Cell viability,72h ATP assay replicate A with strong low nanomolar sensitivity
+KRAS,G12C,AMG-510,0.24,NCI-H358,Cell viability,72h ATP assay replicate B with matching potency
+KRAS,G12C,AMG-510,18.40,NCI-H358,Cell viability,Outlier replicate with serum shift and weaker response
+KRAS,G12C,MRTX849,0.11,NCI-H358,Cell viability,Anchor replicate with potent inhibition
+KRAS,G12C,MRTX849,0.16,NCI-H358,Cell viability,Independent replicate confirming low nanomolar activity
+KRAS,G12C,MRTX849,12.80,NCI-H358,Cell viability,Outlier batch with delayed dosing and weaker readout
+KRAS,G12C,ARS-1620,0.92,NCI-H358,Cell viability,Baseline covalent inhibitor response
+KRAS,G12C,ARS-1620,1.08,NCI-H358,Cell viability,Matched replicate confirming subnanomolar to low nanomolar potency
+KRAS,G12C,ARS-1620,110.00,NCI-H358,Cell viability,Strong outlier likely reflecting resistant subpopulation
+KRAS,G13D,AMG-510,58.00,HCT-116,Cell viability,Non-G12C colorectal line shows weak response
+KRAS,G13D,AMG-510,64.00,HCT-116,Cell viability,Follow-up replicate remains weak
+KRAS,G13D,MRTX849,52.00,HCT-116,Cell viability,Weak inhibition in colorectal context
+KRAS,G12V,AMG-510,81.00,SW480,Cell viability,Minimal response in KRAS G12V colon line
+KRAS,G12V,MRTX849,96.00,SW480,Cell viability,Minimal response persists across replicate run
+KRAS,G12S,AMG-510,69.00,A549,Cell viability,Limited response in lung adenocarcinoma context
+KRAS,G12S,ARS-1620,88.00,A549,Cell viability,Weak pathway suppression with high IC50
+KRAS,G12C,AMG-510,0.29,NCI-H2030,Cell viability,Second G12C lung model shows expected potency
+KRAS,G12C,AMG-510,29.00,NCI-H2030,Cell viability,Contradictory outlier with one hundred fold weaker potency
+KRAS,G12C,MRTX849,0.21,NCI-H2030,Cell viability,Matched potent response in second model
+KRAS,G12C,MRTX849,21.00,NCI-H2030,Cell viability,Outlier replicate suggests resistant clone emergence

@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+anthropic
+openai
+httpx
+python-multipart
+umap-learn
+numpy
+scikit-learn
+pydantic
+python-dotenv
