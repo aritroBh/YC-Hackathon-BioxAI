@@ -156,6 +156,22 @@ def _clip_score(value: Any, default: float = 0.0) -> float:
     return round(max(0.0, min(1.0, numeric)), 3)
 
 
+def _skipped_tamarind_verdict(node: ClaimNode) -> dict[str, Any]:
+    return {
+        "verdict": "skipped",
+        "structural_rationale": (
+            f"No structural arbitration target was available for {str(node.subject_name or 'this critical claim').strip()}."
+        ),
+        "confidence": 0.0,
+        "tamarind_job_id": None,
+        "binding_affinity_a": None,
+        "binding_affinity_b": None,
+        "compound_a": str(node.subject_name or "").strip() or None,
+        "compound_b": str(node.object_name or "").strip() or None,
+        "mock": False,
+    }
+
+
 def _format_rationale(explanation: str, experiment: str) -> str:
     explanation = str(explanation or "").strip()
     experiment = str(experiment or "").strip()
@@ -618,10 +634,16 @@ async def run_full_debate(nodes: list[ClaimNode], session: Session) -> list[Clai
         if node_a is None or node_b is None:
             continue
         verdict = await run_tamarind_arbiter(node_a, node_b)
-        if verdict.get("verdict") != "skipped":
-            node_a.tamarind_verdict = verdict
-            node_b.tamarind_verdict = verdict
-            tamarind_nodes_with_verdict.update((node_id_a, node_id_b))
+        node_a.tamarind_verdict = verdict
+        node_b.tamarind_verdict = verdict
+        tamarind_nodes_with_verdict.update((node_id_a, node_id_b))
+
+    for node in node_map.values():
+        if float(node.friction_score or 0.0) < 0.85:
+            continue
+        if node.tamarind_verdict is None:
+            node.tamarind_verdict = _skipped_tamarind_verdict(node)
+            tamarind_nodes_with_verdict.add(node.node_id)
 
     tamarind_nodes_evaluated = len(tamarind_nodes_with_verdict)
 

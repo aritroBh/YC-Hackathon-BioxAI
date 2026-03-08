@@ -14,6 +14,8 @@ import {
   ResponsiveContainer,
 } from "recharts";
 
+import { downloadSessionReport } from "../api/client";
+
 const ANTHROPIC_API_URL = "http://127.0.0.1:8000/api/claude";
 const ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
 
@@ -341,6 +343,9 @@ export default function ExperimentsPanel({
   activeBag,
   bags,
   onSaveToBag,
+  reportReadiness,
+  onExportReport,
+  reportExporting = false,
 }) {
   const [logs, setLogs] = useState([]);
   const [running, setRunning] = useState(false);
@@ -356,6 +361,7 @@ export default function ExperimentsPanel({
   const [litNode, setLitNode] = useState(null);
   const [citationCopied, setCitationCopied] = useState(false);
   const [savedToBag, setSavedToBag] = useState(false);
+  const [reportLoading, setReportLoading] = useState(false);
   const logRef = useRef(null);
 
   useEffect(() => {
@@ -546,125 +552,29 @@ cell lines, and what the structural data suggests.`,
     }
   };
 
-  const generateReport = () => {
-    if (!results) {
+  const generateReport = async () => {
+    if (!sessionId || reportLoading || reportExporting) {
       return;
     }
 
-    const win = window.open("", "_blank");
-    if (!win) {
-      addLog("Report window blocked by the browser.");
+    if (!reportReadiness?.ready) {
+      addLog("Report export is locked until debate and Tamarind jobs finish.");
       return;
     }
 
-    const reportHtml = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Dialectic Experiment Report</title>
-        <style>
-          body {
-            font-family: 'Courier New', monospace;
-            max-width: 800px; margin: 40px auto;
-            color: #1a1a2e; font-size: 12px; line-height: 1.6;
-          }
-          h1 { font-size: 20px; border-bottom: 2px solid #1a1a2e; padding-bottom: 8px; }
-          h2 { font-size: 14px; color: #333; margin-top: 24px; }
-          .badge {
-            display: inline-block; padding: 2px 8px;
-            border: 1px solid #333; font-size: 10px;
-            margin-right: 6px; text-transform: uppercase;
-          }
-          .score-box {
-            background: #f5f5f5; border: 1px solid #ddd;
-            padding: 12px; margin: 8px 0;
-          }
-          .warning {
-            border-left: 3px solid #cc0000;
-            padding-left: 10px; color: #cc0000;
-          }
-          table { width: 100%; border-collapse: collapse; margin: 12px 0; }
-          td, th { border: 1px solid #ddd; padding: 6px 10px; font-size: 11px; }
-          th { background: #f0f0f0; }
-          .footer { margin-top: 40px; font-size: 10px; color: #999; border-top: 1px solid #ddd; padding-top: 12px; }
-        </style>
-      </head>
-      <body>
-        <h1>⬡ Dialectic — Experiment Report</h1>
-        <p>Generated: ${escapeHtml(new Date().toLocaleString())} · Session: ${escapeHtml(sessionId)}</p>
-
-        <h2>Contradiction Summary</h2>
-        <div class="warning">
-          <strong>${escapeHtml(privateNode?.subject_name || "Private compound")}</strong>
-          reports IC50 = ${escapeHtml(privateNode?.quantitative_value)}${escapeHtml(privateNode?.quantitative_unit || "nM")}
-          (private assay, ${escapeHtml(privateNode?.cell_line || "unknown cell line")})
-          vs published IC50 = ${escapeHtml(litNode?.quantitative_value)}${escapeHtml(litNode?.quantitative_unit || "nM")}
-          (${escapeHtml(litNode?.citation_count || "?")} citations).
-          Friction score: ${escapeHtml(privateNode?.friction_score?.toFixed(2) || "0.85")} (CRITICAL).
-        </div>
-
-        <h2>DiffDock Results</h2>
-        <table>
-          <tr>
-            <th>Direction</th>
-            <th>Compound</th>
-            <th>Conditions</th>
-            <th>DiffDock Score</th>
-            <th>Est. IC50 (nM)</th>
-            <th>Verdict</th>
-          </tr>
-          ${results.direction_a ? `<tr>
-            <td>My Data → Their Protocol</td>
-            <td>${escapeHtml(results.direction_a.compound)}</td>
-            <td>${escapeHtml(results.direction_a.conditions)}</td>
-            <td>${escapeHtml(formatFixed(results.direction_a.diffdock_score, 3))}</td>
-            <td>${escapeHtml(results.direction_a.estimated_ic50_nm)}</td>
-            <td>${escapeHtml(results.direction_a.verdict)}</td>
-          </tr>` : ""}
-          ${results.direction_b ? `<tr>
-            <td>Their Data → My Protocol</td>
-            <td>${escapeHtml(results.direction_b.compound)}</td>
-            <td>${escapeHtml(results.direction_b.conditions)}</td>
-            <td>${escapeHtml(formatFixed(results.direction_b.diffdock_score, 3))}</td>
-            <td>${escapeHtml(results.direction_b.estimated_ic50_nm)}</td>
-            <td>${escapeHtml(results.direction_b.verdict)}</td>
-          </tr>` : ""}
-        </table>
-
-        <h2>Structural Interpretation</h2>
-        <p>${escapeHtml(summary || "Not generated.")}</p>
-
-        ${nextSteps.length > 0 ? `
-        <h2>Recommended Next Experiments</h2>
-        <ol>
-          ${nextSteps.map((step) => `
-            <li>
-              <strong>${escapeHtml(step.title)}</strong><br/>
-              ${escapeHtml(step.rationale)}<br/>
-              <em>Suggested: ${escapeHtml(step.prefill?.compound)} in ${escapeHtml(step.prefill?.cell_line)}</em>
-            </li>
-          `).join("")}
-        </ol>` : ""}
-
-        <h2>BioRender Pathway Visualization</h2>
-        <p>
-          View the KRAS signaling pathway relevant to this contradiction in BioRender:<br/>
-          <a href="https://app.biorender.com/biorender-templates?search=KRAS" target="_blank">
-            https://app.biorender.com/biorender-templates?search=KRAS
-          </a>
-        </p>
-
-        <div class="footer">
-          Dialectic · Bio x AI Hackathon · YC HQ · ${escapeHtml(new Date().toLocaleDateString())}
-          · Powered by Claude (Anthropic) + DiffDock (Tamarind Bio)
-        </div>
-      </body>
-      </html>
-    `;
-
-    win.document.write(reportHtml);
-    win.document.close();
-    win.print();
+    setReportLoading(true);
+    try {
+      if (onExportReport) {
+        await onExportReport();
+      } else {
+        await downloadSessionReport(sessionId);
+      }
+      addLog("Exported session report.");
+    } catch (error) {
+      addLog(`Report export failed: ${error.message || "Unknown error."}`);
+    } finally {
+      setReportLoading(false);
+    }
   };
 
   const restoreHistoryRun = (run) => {
@@ -1300,8 +1210,19 @@ cell lines, and what the structural data suggests.`,
               </div>
 
               <div style={s.exportRow}>
-                <button type="button" style={s.exportBtn} onClick={() => generateReport()}>
-                  ◈ Export Report
+                <button
+                  type="button"
+                  style={{
+                    ...s.exportBtn,
+                    opacity: reportLoading || reportExporting ? 0.7 : (reportReadiness?.ready ? 1 : 0.5),
+                    borderColor: reportReadiness?.ready ? "#00e5a0" : "#3a4055",
+                    color: reportReadiness?.ready ? "#00e5a0" : "#6b7590",
+                    cursor: reportReadiness?.ready ? "pointer" : "not-allowed",
+                  }}
+                  onClick={() => generateReport()}
+                  disabled={reportLoading || reportExporting || !reportReadiness?.ready}
+                >
+                  {reportLoading || reportExporting ? "Generating..." : (reportReadiness?.ready ? "◈ Export Report" : "\u23f3 Experiments Running")}
                 </button>
                 <button
                   type="button"

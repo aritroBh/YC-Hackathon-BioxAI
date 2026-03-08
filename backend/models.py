@@ -48,6 +48,7 @@ class ClaimNode(BaseModel):
     abstract_url: Optional[str]
     paper_authors: Optional[str] = None
     paper_year: Optional[int] = None
+    journal: Optional[str] = None
     umap_x: Optional[float] = None
     umap_y: Optional[float] = None
     friction_score: float = 0.0

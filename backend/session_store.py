@@ -55,6 +55,8 @@ def load_session_from_disk(session_id: str) -> Optional[Session]:
         return None
 
     data = json.loads(path.read_text(encoding="utf-8-sig"))
+    if data.get("status") == "ready":
+        data["status"] = "complete"
     session = Session.model_validate(data)
     with _LOCK:
         _SESSIONS[session_id] = session

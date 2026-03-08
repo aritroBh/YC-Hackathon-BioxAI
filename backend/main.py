@@ -11,7 +11,7 @@ from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from agents import tamarind_arbiter
@@ -28,6 +28,14 @@ from pipeline.ingest_url import ingest_url
 from pipeline.ingest_xlsx import ingest_xlsx
 from pipeline.ingest_youtube import ingest_youtube
 from pipeline.umap_reducer import reduce_umap
+from reporting import (
+    REPORT_FILENAME,
+    REPORT_MEDIA_TYPE,
+    build_report_payload,
+    cleanup_report_artifacts,
+    compute_session_readiness,
+    render_report_docx,
+)
 from session_store import create_session, get_session, load_session_from_disk, update_session
 
 load_dotenv()
@@ -80,6 +88,11 @@ class SemanticScholarRequest(BaseModel):
     paper_count: int = 100
     session_id: str | None = None
     semantic_focus: str = ""
+
+
+class ExportReportRequest(BaseModel):
+    session_id: str
+    report_title: str | None = None
 
 
 def _anthropic_client() -> AsyncAnthropic | None:
@@ -183,6 +196,22 @@ def _format_quantitative_value(node: ClaimNode) -> str:
     if node.quantitative_value is None:
         return "n/a"
     return f"{node.quantitative_value:g} {node.quantitative_unit or ''}".strip()
+
+
+def _default_skipped_tamarind_verdict(node: ClaimNode) -> dict[str, Any]:
+    return {
+        "verdict": "skipped",
+        "structural_rationale": (
+            f"No structural arbitration target was available for {_node_compound_name(node)} in this critical claim."
+        ),
+        "confidence": 0.0,
+        "tamarind_job_id": None,
+        "binding_affinity_a": None,
+        "binding_affinity_b": None,
+        "compound_a": _node_compound_name(node),
+        "compound_b": node.object_name,
+        "mock": False,
+    }
 
 
 def _node_conditions(node: ClaimNode) -> str:
@@ -479,7 +508,7 @@ async def _finalize_session_pipeline(session_id: str) -> None:
             session_id,
             nodes=nodes,
             debate_results={"clusters": {}, "note": "Skipped debate because fewer than four nodes were ingested."},
-            status="ready",
+            status="complete",
             progress=100,
             error_message=None,
         )
@@ -500,7 +529,77 @@ async def _finalize_session_pipeline(session_id: str) -> None:
     nodes = await run_full_debate(nodes, session)
 
     _update_session_state(session_id, nodes=nodes, status="finalizing", progress=97)
-    _update_session_state(session_id, nodes=nodes, status="ready", progress=100, error_message=None)
+    _update_session_state(session_id, nodes=nodes, status="complete", progress=100, error_message=None)
+
+
+async def _hydrate_legacy_tamarind_verdicts(session_id: str) -> Session | None:
+    session = get_session(session_id)
+    if session is None or session.status != "complete":
+        return session
+
+    needs_backfill = any(
+        float(node.friction_score or 0.0) >= 0.85 and node.tamarind_verdict is None
+        for node in session.nodes
+    )
+    if not needs_backfill:
+        return session
+
+    nodes = [node.model_copy(deep=True) for node in session.nodes]
+    node_map = {node.node_id: node for node in nodes}
+    processed_pairs: set[tuple[str, str]] = set()
+    updated = False
+
+    critical_nodes = sorted(
+        [node for node in nodes if float(node.friction_score or 0.0) >= 0.85],
+        key=lambda node: float(node.friction_score or 0.0),
+        reverse=True,
+    )
+
+    for node in critical_nodes:
+        if node.tamarind_verdict is not None:
+            continue
+
+        partners = [
+            node_map[other_id]
+            for other_id in node.contradicting_node_ids
+            if other_id in node_map
+        ]
+
+        inherited = next((partner.tamarind_verdict for partner in partners if partner.tamarind_verdict is not None), None)
+        if inherited is not None:
+            node.tamarind_verdict = inherited
+            updated = True
+            continue
+
+        partner = next(
+            (
+                candidate
+                for candidate in sorted(
+                    partners,
+                    key=lambda item: float(item.friction_score or 0.0),
+                    reverse=True,
+                )
+                if tuple(sorted((node.node_id, candidate.node_id))) not in processed_pairs
+            ),
+            None,
+        )
+
+        if partner is None:
+            node.tamarind_verdict = _default_skipped_tamarind_verdict(node)
+            updated = True
+            continue
+
+        pair_key = tuple(sorted((node.node_id, partner.node_id)))
+        verdict = await run_tamarind_arbiter(node, partner)
+        node.tamarind_verdict = verdict
+        partner.tamarind_verdict = verdict
+        processed_pairs.add(pair_key)
+        updated = True
+
+    if updated:
+        _update_session_state(session_id, nodes=nodes)
+        session = get_session(session_id)
+    return session
 
 
 async def _add_nodes_and_finalize(session_id: str, new_nodes: list[ClaimNode]) -> int:
@@ -781,6 +880,48 @@ async def run_experiment_endpoint(request: ExperimentRequest) -> StreamingRespon
     )
 
 
+@app.post("/api/export/report")
+async def export_report_route(request: ExportReportRequest) -> Response:
+    session = await _hydrate_legacy_tamarind_verdicts(request.session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    if not session.nodes:
+        raise HTTPException(status_code=400, detail="Session contains no nodes to export.")
+
+    readiness = compute_session_readiness(session.status, session.nodes, session.progress)
+    if not readiness["ready"]:
+        raise HTTPException(status_code=409, detail="Session export is not ready yet. Wait for debate and Tamarind jobs to finish.")
+
+    payload: dict[str, Any] | None = None
+    try:
+        payload = build_report_payload(
+            session_id=session.session_id,
+            nodes=session.nodes,
+            report_title=request.report_title,
+            session_status=session.status,
+            session_progress=session.progress,
+        )
+        document_bytes, validation_ok = await asyncio.to_thread(render_report_docx, payload)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}") from exc
+    finally:
+        if payload is not None:
+            cleanup_report_artifacts(payload)
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{REPORT_FILENAME}"',
+    }
+    if not validation_ok:
+        headers["X-Dialectic-Warning"] = "docx validation failed"
+    return Response(
+        content=document_bytes,
+        media_type=REPORT_MEDIA_TYPE,
+        headers=headers,
+    )
+
+
 @app.get("/api/demo")
 async def demo_route() -> dict[str, str]:
     return {"session_id": DEMO_SESSION_ID}
@@ -797,6 +938,14 @@ async def session_status_route(session_id: str) -> dict[str, Any]:
         "node_count": len(session.nodes),
         "error_message": session.error_message,
     }
+
+
+@app.get("/api/session/{session_id}/readiness")
+async def session_readiness_route(session_id: str) -> dict[str, Any]:
+    session = await _hydrate_legacy_tamarind_verdicts(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    return compute_session_readiness(session.status, session.nodes, session.progress)
 
 
 @app.get("/api/session/{session_id}/nodes")

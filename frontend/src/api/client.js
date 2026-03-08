@@ -16,6 +16,19 @@ async function parseJsonResponse(response, fallbackMessage) {
   return payload;
 }
 
+function extractDownloadFilename(response, fallbackName) {
+  const disposition = response.headers.get("content-disposition") || "";
+  const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    return decodeURIComponent(utf8Match[1]);
+  }
+  const plainMatch = disposition.match(/filename="?([^"]+)"?/i);
+  if (plainMatch?.[1]) {
+    return plainMatch[1];
+  }
+  return fallbackName;
+}
+
 export async function analyzeSchema(headers, sampleRows, fileName) {
   const response = await fetch(`${BASE}/schema-agent`, {
     method: "POST",
@@ -118,7 +131,7 @@ export function pollStatus(sessionId, onUpdate, intervalMs = 2000) {
 
         onUpdate?.(data);
 
-        if (data.status === "ready") {
+        if (data.status === "ready" || data.status === "complete") {
           resolve(data);
           return;
         }
@@ -149,6 +162,44 @@ export function pollStatus(sessionId, onUpdate, intervalMs = 2000) {
 export async function getSessionNodes(sessionId) {
   const response = await fetch(`${BASE}/session/${sessionId}/nodes`);
   return parseJsonResponse(response, `Failed to load nodes: ${response.status}`);
+}
+
+export async function getSessionReadiness(sessionId) {
+  const response = await fetch(`${BASE}/session/${sessionId}/readiness`);
+  return parseJsonResponse(response, `Failed to load readiness: ${response.status}`);
+}
+
+export async function downloadSessionReport(sessionId, reportTitle = null) {
+  const response = await fetch(`${BASE}/export/report`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: sessionId,
+      report_title: reportTitle,
+    }),
+  });
+
+  if (!response.ok) {
+    const contentType = response.headers.get("content-type") || "";
+    const payload = contentType.includes("application/json")
+      ? await response.json()
+      : await response.text();
+    const message = typeof payload === "string"
+      ? payload
+      : payload?.detail || payload?.error || `Report export failed: ${response.status}`;
+    throw new Error(message);
+  }
+
+  const blob = await response.blob();
+  const filename = extractDownloadFilename(response, "dialectic_report.docx");
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
 }
 
 export async function streamOracle(sessionId, selectedNodeIds, messages, bagName = null) {

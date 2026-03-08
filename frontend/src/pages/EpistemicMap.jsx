@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
-import { getSessionNodes } from "../api/client";
+import { downloadSessionReport, getSessionNodes, getSessionReadiness } from "../api/client";
 import BagsPanel, { BAG_COLORS } from "../components/BagsPanel";
 import ExperimentsPanel from "../components/ExperimentsPanel";
 import InspectorPanel from "../components/InspectorPanel";
@@ -12,6 +12,19 @@ import ScoutAgent from "../components/ScoutAgent";
 function createBagId() {
   return globalThis.crypto?.randomUUID?.() ?? `bag-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
+
+const EMPTY_READINESS = {
+  ready: false,
+  checks: {
+    debate_complete: false,
+    tamarind_jobs_total: 0,
+    tamarind_jobs_done: 0,
+    tamarind_jobs_failed: 0,
+    nodes_total: 0,
+    nodes_with_quantitative: 0,
+  },
+  percent_complete: 0,
+};
 
 export default function EpistemicMap() {
   const { sessionId } = useParams();
@@ -32,6 +45,8 @@ export default function EpistemicMap() {
   const [rightWidth, setRightWidth] = useState(280);
   const [scoutHighlightIds, setScoutHighlightIds] = useState([]);
   const [scoutHighlightColor, setScoutHighlightColor] = useState("#ffff00");
+  const [isExportingReport, setIsExportingReport] = useState(false);
+  const [reportReadiness, setReportReadiness] = useState(EMPTY_READINESS);
   const mapCanvasRef = useRef(null);
   const [viewportWidth, setViewportWidth] = useState(
     typeof window !== "undefined" ? window.innerWidth : 1440,
@@ -68,6 +83,43 @@ export default function EpistemicMap() {
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    let timeoutId = null;
+
+    const pollReadiness = async () => {
+      if (!sessionId) {
+        return;
+      }
+
+      try {
+        const data = await getSessionReadiness(sessionId);
+        if (!active) {
+          return;
+        }
+        setReportReadiness(data);
+        if (!data.ready) {
+          timeoutId = window.setTimeout(pollReadiness, 4000);
+        }
+      } catch {
+        if (!active) {
+          return;
+        }
+        timeoutId = window.setTimeout(pollReadiness, 4000);
+      }
+    };
+
+    setReportReadiness(EMPTY_READINESS);
+    void pollReadiness();
+
+    return () => {
+      active = false;
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [sessionId]);
 
   useEffect(() => {
     const handler = (event) => {
@@ -252,6 +304,22 @@ export default function EpistemicMap() {
     [activeBagId, bags],
   );
 
+  const handleExportReport = useCallback(async () => {
+    if (!sessionId || isExportingReport || !reportReadiness.ready) {
+      return;
+    }
+
+    setIsExportingReport(true);
+    try {
+      await downloadSessionReport(sessionId);
+    } catch (exportError) {
+      const message = exportError instanceof Error ? exportError.message : String(exportError);
+      window.alert(`Report export failed: ${message}`);
+    } finally {
+      setIsExportingReport(false);
+    }
+  }, [isExportingReport, reportReadiness.ready, sessionId]);
+
   const stats = useMemo(() => ({
     total: nodes.length,
     critical: nodes.filter((node) => (node.friction_score ?? 0) >= 0.85).length,
@@ -308,6 +376,15 @@ export default function EpistemicMap() {
   }, [oracleQuery, rightTab]);
 
   const isStackedLayout = viewportWidth < 1180;
+  const exportPercent = Math.round(Number(reportReadiness.percent_complete || 0));
+  const exportButtonDisabled = !sessionId || isExportingReport || !reportReadiness.ready;
+  const exportButtonLabel = isExportingReport
+    ? "Generating..."
+    : reportReadiness.ready
+      ? "\u2193 Export Report"
+      : `\u23f3 Running Experiments\u2026 ${exportPercent}%`;
+  const tamarindStatus = `Tamarind: ${reportReadiness.checks?.tamarind_jobs_done ?? 0}/${reportReadiness.checks?.tamarind_jobs_total ?? 0} docking jobs complete`;
+  const debateStatus = `Debate: ${reportReadiness.checks?.debate_complete ? "\u2713" : "running"}`;
 
   if (isLoading) {
     return (
@@ -775,6 +852,66 @@ export default function EpistemicMap() {
               </span>
             ) : null}
           </div>
+
+          <div
+            style={{
+              marginLeft: "auto",
+              pointerEvents: "all",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "flex-end",
+              gap: 4,
+            }}
+          >
+            <button
+              type="button"
+              className={reportReadiness.ready && !isExportingReport ? "toolbar-export-ready" : ""}
+              onClick={handleExportReport}
+              disabled={exportButtonDisabled}
+              style={{
+                background: "#0c0e12",
+                border: `1px solid ${reportReadiness.ready ? "#00e5a0" : "#3a4055"}`,
+                color: reportReadiness.ready ? "#00e5a0" : "#6b7590",
+                fontFamily: "'DM Mono',monospace",
+                fontSize: 11,
+                padding: "8px 14px",
+                cursor: exportButtonDisabled
+                  ? (isExportingReport ? "progress" : "not-allowed")
+                  : "pointer",
+                backdropFilter: "blur(8px)",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                opacity: isExportingReport ? 0.9 : 1,
+                transition: "box-shadow 0.15s ease, border-color 0.15s ease",
+              }}
+            >
+              {isExportingReport ? (
+                <span
+                  style={{
+                    width: 12,
+                    height: 12,
+                    border: "2px solid rgba(0,229,160,0.25)",
+                    borderTopColor: "#00e5a0",
+                    borderRadius: "50%",
+                    display: "inline-block",
+                    animation: "toolbar-spin 0.8s linear infinite",
+                  }}
+                />
+              ) : null}
+              {exportButtonLabel}
+            </button>
+            <div
+              style={{
+                fontFamily: "'DM Mono',monospace",
+                fontSize: 10,
+                color: "#6b7590",
+                textAlign: "right",
+              }}
+            >
+              {tamarindStatus} {"\u00b7"} {debateStatus}
+            </div>
+          </div>
         </div>
 
         <MapCanvas
@@ -885,6 +1022,11 @@ export default function EpistemicMap() {
           </div>
         ) : null}
       </div>
+
+      <style>{`
+        @keyframes toolbar-spin{to{transform:rotate(360deg)}}
+        .toolbar-export-ready:hover{box-shadow:0 0 18px rgba(0,229,160,0.18)}
+      `}</style>
 
       <div
         style={{
@@ -1035,6 +1177,9 @@ export default function EpistemicMap() {
               activeBag={activeBag}
               bags={bags}
               onSaveToBag={handleSaveToBag}
+              reportReadiness={reportReadiness}
+              onExportReport={handleExportReport}
+              reportExporting={isExportingReport}
             />
           ) : null}
         </div>

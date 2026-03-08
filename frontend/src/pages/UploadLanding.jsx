@@ -268,6 +268,7 @@ export default function UploadLanding() {
         debating: "Running Actor/Critic debate pipeline...",
         finalizing: "Finalizing contradictions and layout...",
         ready: "Complete. Loading map...",
+        complete: "Complete. Loading map...",
       };
 
       const pollPromise = pollStatus(sessionId, (data) => {

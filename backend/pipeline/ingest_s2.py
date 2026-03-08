@@ -406,6 +406,7 @@ def _claim_to_node(paper: dict[str, Any], claim: dict[str, Any]) -> ClaimNode | 
         abstract_url=_clean_text(paper.get("abstract_url"), f"https://www.semanticscholar.org/paper/{paper_id}"),
         paper_authors=_author_summary(paper),
         paper_year=paper_year,
+        journal=_clean_text(paper.get("venue")),
         ingested_at=datetime.utcnow().isoformat(),
     )
 
