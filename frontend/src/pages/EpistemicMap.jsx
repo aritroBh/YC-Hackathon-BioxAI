@@ -7,6 +7,7 @@ import ExperimentsPanel from "../components/ExperimentsPanel";
 import InspectorPanel from "../components/InspectorPanel";
 import MapCanvas from "../components/MapCanvas";
 import OraclePanel from "../components/OraclePanel";
+import ScoutAgent from "../components/ScoutAgent";
 
 function createBagId() {
   return globalThis.crypto?.randomUUID?.() ?? `bag-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -26,6 +27,8 @@ export default function EpistemicMap() {
   const [showCriticalOnly, setShowCriticalOnly] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [viewMode, setViewMode] = useState("2D");
+  const [scoutHighlightIds, setScoutHighlightIds] = useState([]);
+  const [scoutHighlightColor, setScoutHighlightColor] = useState("#ffb340");
   const [viewportWidth, setViewportWidth] = useState(
     typeof window !== "undefined" ? window.innerWidth : 1440,
   );
@@ -143,6 +146,38 @@ export default function EpistemicMap() {
     )));
     return true;
   }, [activeBagId]);
+
+  const handleScoutHighlight = useCallback((nodeIds, color) => {
+    setScoutHighlightIds([...new Set(nodeIds || [])]);
+    setScoutHighlightColor(color || "#ffb340");
+  }, []);
+
+  const handleScoutCreateBag = useCallback((name, nodeIds) => {
+    const bagNodeIds = nodes
+      .filter((node) => nodeIds?.includes(node.node_id))
+      .map((node) => node.node_id);
+
+    if (bagNodeIds.length > 0) {
+      handleCreateBag(bagNodeIds, name);
+    }
+  }, [handleCreateBag, nodes]);
+
+  const handleScoutRunDiffDock = useCallback((nodeId) => {
+    const node = nodes.find((candidate) => candidate.node_id === nodeId);
+    if (node) {
+      setInspectedNode(node);
+      setSelectedIds([nodeId]);
+      setRightTab("experiments");
+    }
+  }, [nodes]);
+
+  const handleScoutSelectNode = useCallback((nodeId) => {
+    const node = nodes.find((candidate) => candidate.node_id === nodeId);
+    if (node) {
+      setSelectedIds([nodeId]);
+      setInspectedNode(node);
+    }
+  }, [nodes]);
 
   const activeBag = useMemo(
     () => bags.find((bag) => bag.id === activeBagId) ?? null,
@@ -373,6 +408,17 @@ export default function EpistemicMap() {
               {text}
             </div>
           ))}
+        </div>
+
+        <div style={{ padding: "14px 16px", borderBottom: "1px solid #1e2430" }}>
+          <ScoutAgent
+            nodes={nodes}
+            sessionId={sessionId}
+            onHighlightNodes={handleScoutHighlight}
+            onCreateBag={handleScoutCreateBag}
+            onRunDiffDock={handleScoutRunDiffDock}
+            onSelectNode={handleScoutSelectNode}
+          />
         </div>
 
         <div style={{ padding: "14px 16px", borderBottom: "1px solid #1e2430" }}>
@@ -609,6 +655,8 @@ export default function EpistemicMap() {
           allNodes={nodes}
           selectedIds={selectedIds}
           viewMode={viewMode}
+          scoutHighlightIds={scoutHighlightIds}
+          scoutHighlightColor={scoutHighlightColor}
           onSelectNode={handleSelectNode}
           onMultiSelect={handleMultiSelect}
           onNodeInspect={(node) => {

@@ -541,7 +541,7 @@ function drawClusterOutlines(ctx, clusterLabels, nodesByCluster, worldToScreen, 
   void clusterLabels;
 }
 
-function drawNode(ctx, node, sx, sy, zoom, isSelected, isHovered, viewMode) {
+function drawNode(ctx, node, sx, sy, zoom, isSelected, isHovered, viewMode, isScoutFlagged, scoutHighlightColor) {
   const zoomLevel = getZoomLevel(zoom);
   const friction = node.friction_score ?? 0;
   const [red, green, blue] = getNodeColor(node);
@@ -630,6 +630,22 @@ function drawNode(ctx, node, sx, sy, zoom, isSelected, isHovered, viewMode) {
     ctx.stroke();
   }
 
+  if (isScoutFlagged) {
+    ctx.beginPath();
+    ctx.arc(drawX, drawY, baseRadius + 8, 0, Math.PI * 2);
+    ctx.strokeStyle = scoutHighlightColor;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([3, 3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = scoutHighlightColor;
+    ctx.font = "7px 'DM Mono', monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("◈", drawX, drawY - baseRadius - 6);
+  }
+
   if (isHovered && !isSelected) {
     ctx.beginPath();
     ctx.arc(drawX, drawY, baseRadius + 5, 0, Math.PI * 2);
@@ -700,6 +716,8 @@ export default function MapCanvas({
   allNodes = nodes,
   selectedIds = [],
   viewMode = "2D",
+  scoutHighlightIds = [],
+  scoutHighlightColor = "#ffb340",
   onSelectNode,
   onMultiSelect,
   onHoverNode,
@@ -792,6 +810,11 @@ export default function MapCanvas({
   const selectedIdSet = useMemo(
     () => new Set(selectedIds),
     [selectedIds],
+  );
+
+  const scoutHighlightIdSet = useMemo(
+    () => new Set(scoutHighlightIds),
+    [scoutHighlightIds],
   );
 
   const pointColoringItems = useMemo(
@@ -1129,6 +1152,8 @@ export default function MapCanvas({
         selectedIdSet.has(node.node_id),
         false,
         viewMode,
+        scoutHighlightIdSet.has(node.node_id),
+        scoutHighlightColor,
       );
     });
 
@@ -1143,6 +1168,8 @@ export default function MapCanvas({
         selectedIdSet.has(hoveredRenderableNode.node_id),
         true,
         viewMode,
+        scoutHighlightIdSet.has(hoveredRenderableNode.node_id),
+        scoutHighlightColor,
       );
     }
 
@@ -1164,6 +1191,8 @@ export default function MapCanvas({
     project3D,
     projectNode,
     renderableNodes,
+    scoutHighlightColor,
+    scoutHighlightIdSet,
     selectedIdSet,
     syncCanvasSize,
     tool,
