@@ -218,19 +218,21 @@ export default function ScoutAgent({
     onHighlightNodes?.([], "#ffb340");
     addLog("► Scout scan initiated...");
 
-    const nodeSlim = nodes.map((node) => ({
-      id: node.node_id,
-      subject: node.subject_name,
-      object: node.object_name,
-      friction: node.friction_score,
-      polarity: node.polarity,
-      source: node.source_type,
-      ic50: node.quantitative_value,
-      unit: node.quantitative_unit,
-      cell_line: node.cell_line,
-      contradictions: node.contradicting_node_ids?.length || 0,
-      debate_state: node.debate_state,
-    }));
+    const nodeSlim = nodes
+      .filter((n) => n.umap_x != null)
+      .sort((a, b) => (b.friction_score || 0) - (a.friction_score || 0))
+      .slice(0, 50)
+      .map((n) => ({
+        id: n.node_id?.slice(0, 8),
+        s: n.subject_name?.slice(0, 20),
+        o: n.object_name?.slice(0, 20),
+        f: n.friction_score,
+        p: n.polarity,
+        src: n.source_type === "private_csv" ? "priv" : "pub",
+        ic50: n.quantitative_value,
+        cl: n.cell_line?.slice(0, 15),
+        cx: n.contradicting_node_ids?.length || 0,
+      }));
 
     const userPrompt = customInstructions
       ? `Session: ${sessionId}\nCustom focus: ${customInstructions}\n\nMap data (${nodes.length} nodes):\n${JSON.stringify(nodeSlim)}`
@@ -253,7 +255,7 @@ export default function ScoutAgent({
         },
         body: JSON.stringify({
           model: ANTHROPIC_MODEL,
-          max_tokens: 1000,
+          max_tokens: 1500,
           system: SCOUT_SYSTEM_PROMPT,
           messages: [{ role: "user", content: userPrompt }],
         }),
