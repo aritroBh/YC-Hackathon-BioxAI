@@ -329,8 +329,6 @@ export default function EpistemicMap() {
       <aside
         style={{
           width: isStackedLayout ? "100%" : leftWidth,
-          minWidth: isStackedLayout ? "100%" : 120,
-          maxWidth: isStackedLayout ? "100%" : 280,
           flexShrink: 0,
           background: "#0c0e12",
           borderRight: isStackedLayout ? "none" : "1px solid #1e2430",
@@ -606,8 +604,8 @@ export default function EpistemicMap() {
               const startX = event.clientX;
               const startW = leftWidth;
               const onMove = (moveEvent) => {
-                const newW = Math.min(280, Math.max(120, startW + moveEvent.clientX - startX));
-                setLeftWidth(newW);
+                const newW = startW + moveEvent.clientX - startX;
+                setLeftWidth(Math.max(0, newW));
               };
               const onUp = () => {
                 window.removeEventListener("mousemove", onMove);
@@ -844,8 +842,6 @@ export default function EpistemicMap() {
       <div
         style={{
           width: isStackedLayout ? "100%" : rightWidth,
-          minWidth: isStackedLayout ? "100%" : 220,
-          maxWidth: isStackedLayout ? "100%" : 480,
           minHeight: isStackedLayout ? 540 : "100%",
           flexShrink: 0,
           background: "#0c0e12",
@@ -864,8 +860,8 @@ export default function EpistemicMap() {
               const startX = event.clientX;
               const startW = rightWidth;
               const onMove = (moveEvent) => {
-                const newW = Math.min(480, Math.max(220, startW - moveEvent.clientX + startX));
-                setRightWidth(newW);
+                const newW = startW - moveEvent.clientX + startX;
+                setRightWidth(Math.max(0, newW));
               };
               const onUp = () => {
                 window.removeEventListener("mousemove", onMove);
