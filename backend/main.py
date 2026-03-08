@@ -9,7 +9,7 @@ from typing import Any, AsyncGenerator
 
 from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -956,3 +956,20 @@ Never use biology from training not grounded in a loaded node.
         media_type="text/plain",
         headers={"Cache-Control": "no-cache"},
     )
+
+
+@app.post("/api/claude")
+async def claude_proxy(request: Request) -> dict[str, Any]:
+    body = await request.json()
+    import anthropic
+
+    client = anthropic.Anthropic()
+    response = client.messages.create(
+        model=body.get("model", "claude-sonnet-4-20250514"),
+        max_tokens=body.get("max_tokens", 1000),
+        system=body.get("system", ""),
+        messages=body.get("messages", []),
+    )
+    return {
+        "content": [{"type": "text", "text": response.content[0].text}]
+    }

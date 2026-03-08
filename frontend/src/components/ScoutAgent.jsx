@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_API_URL = "http://127.0.0.1:8000/api/claude";
 const ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
-const ANTHROPIC_API_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY?.trim();
 
 const SCOUT_SYSTEM_PROMPT = `You are the Dialectic Scout Agent — a proactive
 autonomous research assistant scanning a biological claim map for a pharma scientist.
@@ -154,9 +153,6 @@ export default function ScoutAgent({
         signal,
         headers: {
           "Content-Type": "application/json",
-          "anthropic-version": "2023-06-01",
-          "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY,
-          "anthropic-dangerous-direct-browser-access": "true",
         },
         body: JSON.stringify({
           model: ANTHROPIC_MODEL,
@@ -239,19 +235,12 @@ export default function ScoutAgent({
       : `Session: ${sessionId}\nScan this biological claim map and find the most important patterns.\nMap data (${nodes.length} nodes):\n${JSON.stringify(nodeSlim)}`;
 
     try {
-      if (!ANTHROPIC_API_KEY) {
-        throw new Error("Missing VITE_ANTHROPIC_API_KEY.");
-      }
-
       addLog(`► Pass 1: Analyzing ${nodes.length} nodes...`);
       const response = await fetch(ANTHROPIC_API_URL, {
         method: "POST",
         signal: controller.signal,
         headers: {
           "Content-Type": "application/json",
-          "anthropic-version": "2023-06-01",
-          "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY,
-          "anthropic-dangerous-direct-browser-access": "true",
         },
         body: JSON.stringify({
           model: ANTHROPIC_MODEL,
