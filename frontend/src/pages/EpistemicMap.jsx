@@ -131,8 +131,25 @@ export default function EpistemicMap() {
   }), [nodes]);
 
   const visibleNodes = useMemo(
-    () => (showCriticalOnly ? nodes.filter((node) => (node.friction_score ?? 0) >= 0.6) : nodes),
-    [nodes, showCriticalOnly],
+    () => {
+      const filteredByFriction = showCriticalOnly
+        ? nodes.filter((node) => (node.friction_score ?? 0) >= 0.6)
+        : nodes;
+      const normalizedQuery = searchQuery.trim().toLowerCase();
+
+      if (!normalizedQuery) {
+        return filteredByFriction;
+      }
+
+      return filteredByFriction.filter((node) => (
+        (node.claim_text || "").toLowerCase().includes(normalizedQuery)
+        || (node.subject_name || "").toLowerCase().includes(normalizedQuery)
+        || (node.object_name || "").toLowerCase().includes(normalizedQuery)
+        || (node.cell_line || "").toLowerCase().includes(normalizedQuery)
+        || (node.compound || "").toLowerCase().includes(normalizedQuery)
+      ));
+    },
+    [nodes, searchQuery, showCriticalOnly],
   );
 
   const selectedNodes = useMemo(
@@ -507,6 +524,7 @@ export default function EpistemicMap() {
             <span style={{ color: "#3a4055", fontSize: 12 }}>find</span>
             <input
               value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
               placeholder="Search by compound, gene, cell line..."
               style={{
                 background: "transparent",
@@ -518,33 +536,12 @@ export default function EpistemicMap() {
                 padding: "8px 0",
                 width: "100%",
               }}
-              onChange={(event) => {
-                const query = event.target.value;
-                const normalizedQuery = query.trim().toLowerCase();
-
-                setSearchQuery(query);
-
-                if (!normalizedQuery) {
-                  setSelectedIds([]);
-                  return;
-                }
-
-                const matches = nodes
-                  .filter((node) => (
-                    node.claim_text?.toLowerCase().includes(normalizedQuery)
-                    || node.subject_name?.toLowerCase().includes(normalizedQuery)
-                    || node.object_name?.toLowerCase().includes(normalizedQuery)
-                    || node.cell_line?.toLowerCase().includes(normalizedQuery)
-                  ))
-                  .map((node) => node.node_id)
-                  .slice(0, 50);
-
-                setSelectedIds(matches);
-                if (matches.length > 0) {
-                  setInspectedNode(nodeMap[matches[0]] ?? null);
-                }
-              }}
             />
+            {searchQuery.trim() ? (
+              <span style={{ color: "#6b7590", fontSize: 12, whiteSpace: "nowrap" }}>
+                {visibleNodes.length} nodes
+              </span>
+            ) : null}
           </div>
         </div>
 
