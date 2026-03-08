@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 
 import { getSessionNodes } from "../api/client";
 import BagsPanel, { BAG_COLORS } from "../components/BagsPanel";
+import ExperimentsPanel from "../components/ExperimentsPanel";
 import InspectorPanel from "../components/InspectorPanel";
 import MapCanvas from "../components/MapCanvas";
 import OraclePanel from "../components/OraclePanel";
@@ -96,6 +97,9 @@ export default function EpistemicMap() {
         nodeIds: [...new Set(nodeIds)],
         color: BAG_COLORS[currentBags.length % BAG_COLORS.length],
         createdAt: Date.now(),
+        metadata: {
+          experimentNotes: [],
+        },
       },
     ]);
     setActiveBagId(id);
@@ -117,6 +121,28 @@ export default function EpistemicMap() {
       bag.id === id ? { ...bag, name: trimmedName } : bag
     )));
   }, []);
+
+  const handleSaveToBag = useCallback((bagIdOrNote, maybeNote) => {
+    const targetBagId = maybeNote === undefined ? activeBagId : bagIdOrNote;
+    const note = maybeNote === undefined ? bagIdOrNote : maybeNote;
+
+    if (!targetBagId || !note) {
+      return false;
+    }
+
+    setBags((currentBags) => currentBags.map((bag) => (
+      bag.id === targetBagId
+        ? {
+            ...bag,
+            metadata: {
+              ...(bag.metadata || {}),
+              experimentNotes: [...(bag.metadata?.experimentNotes || []), note],
+            },
+          }
+        : bag
+    )));
+    return true;
+  }, [activeBagId]);
 
   const activeBag = useMemo(
     () => bags.find((bag) => bag.id === activeBagId) ?? null,
@@ -587,7 +613,11 @@ export default function EpistemicMap() {
           onMultiSelect={handleMultiSelect}
           onNodeInspect={(node) => {
             setInspectedNode(node);
-            setRightTab("inspector");
+            if ((node.friction_score ?? 0) >= 0.85) {
+              setRightTab("experiments");
+            } else {
+              setRightTab("inspector");
+            }
           }}
         />
 
@@ -698,6 +728,7 @@ export default function EpistemicMap() {
             { id: "inspector", icon: "I", label: "Inspector" },
             { id: "oracle", icon: "O", label: "Oracle" },
             { id: "bags", icon: "B", label: `Bags ${bags.length > 0 ? `(${bags.length})` : ""}` },
+            { id: "experiments", icon: "⬡", label: "Lab" },
           ].map((tab) => (
             <button
               key={tab.id}
@@ -781,6 +812,17 @@ export default function EpistemicMap() {
                 </div>
               ) : null}
             </div>
+          ) : null}
+
+          {rightTab === "experiments" ? (
+            <ExperimentsPanel
+              selectedNode={inspectedNode ?? selectedNodes[0] ?? null}
+              nodes={nodes}
+              sessionId={sessionId}
+              activeBag={activeBag}
+              bags={bags}
+              onSaveToBag={handleSaveToBag}
+            />
           ) : null}
         </div>
       </div>

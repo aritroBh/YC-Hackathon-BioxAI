@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
+import time
 from typing import Any, AsyncGenerator
 
 from anthropic import AsyncAnthropic
@@ -12,8 +14,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from agents import tamarind_arbiter
+from agents.tamarind_arbiter import run_experiment as tamarind_run_experiment, run_tamarind_arbiter
 from agents.schema_agent import analyze_csv
-from models import ClaimNode, OracleRequest, Session
+from models import ClaimNode, ExperimentRequest, OracleRequest, Session
 from pipeline.contradiction_index import build_clean_entity_index, summarize_entity_pair_counts
 from pipeline.debate_runner import run_full_debate
 from pipeline.embedder import embed_nodes
@@ -27,6 +31,7 @@ from pipeline.umap_reducer import reduce_umap
 from session_store import create_session, get_session, load_session_from_disk, update_session
 
 load_dotenv()
+tamarind_arbiter.TAMARIND_API_KEY = os.getenv("TAMARIND_API_KEY", "").strip()
 
 DEMO_SESSION_ID = "55500fc5f1654234b44f5d61182cf924"
 
@@ -153,6 +158,171 @@ def _private_provenance(node: ClaimNode) -> str:
 
 def _node_provenance(node: ClaimNode) -> str:
     return _private_provenance(node) if node.source_type == "private_csv" else _public_provenance(node)
+
+
+def _is_private_node(node: ClaimNode) -> bool:
+    return node.source_type == "private_csv"
+
+
+def _node_compound_name(node: ClaimNode) -> str:
+    candidates = [
+        (node.subject_type, node.subject_name),
+        (node.object_type, node.object_name),
+        (None, node.subject_name),
+        (None, node.object_name),
+    ]
+    for value_type, value in candidates:
+        if not value:
+            continue
+        if value_type is None or "compound" in value_type.lower():
+            return value
+    return "Unknown compound"
+
+
+def _format_quantitative_value(node: ClaimNode) -> str:
+    if node.quantitative_value is None:
+        return "n/a"
+    return f"{node.quantitative_value:g} {node.quantitative_unit or ''}".strip()
+
+
+def _node_conditions(node: ClaimNode) -> str:
+    parts = []
+    if node.cell_line:
+        parts.append(f"cell line {node.cell_line}")
+    if node.predicate_relation:
+        parts.append(f"assay {node.predicate_relation}")
+    if node.quantitative_value is not None:
+        parts.append(f"reported {_format_quantitative_value(node)}")
+    return " | ".join(parts) if parts else "reference protocol"
+
+
+def _has_tamarind_api_key() -> bool:
+    return bool(os.getenv("TAMARIND_API_KEY", "").strip())
+
+
+def _confidence_to_ic50_nm(score: float | None) -> float | None:
+    if score is None:
+        return None
+    return round((10 ** (-score * 0.8)) * 100, 3)
+
+
+def _binding_label(score: float | None) -> str:
+    if score is None:
+        return "No docking score available"
+    if score > -1.5:
+        return "Strong predicted binding"
+    if score > -2.5:
+        return "Moderate predicted binding"
+    return "Weak predicted binding"
+
+
+def _experiment_timeline(node_a: ClaimNode, node_b: ClaimNode, ran_direction_a: bool, ran_direction_b: bool) -> list[float]:
+    final_score = min(1.0, max(float(node_a.friction_score or 0.0), float(node_b.friction_score or 0.0)))
+    baseline = 0.1
+    pass_one = min(1.0, round(final_score * 0.4, 3))
+    cross_corpus = min(1.0, round(final_score * 0.7, 3))
+    after_a = min(1.0, round(final_score * 0.88, 3)) if ran_direction_a else cross_corpus
+    after_b = round(final_score, 3) if ran_direction_b else after_a
+    return [baseline, pass_one, cross_corpus, after_a, after_b]
+
+
+def _experiment_recommendation(
+    direction_a: dict[str, Any] | None,
+    direction_b: dict[str, Any] | None,
+    node_a: ClaimNode,
+    node_b: ClaimNode,
+) -> str:
+    compound_a = _node_compound_name(node_a)
+    compound_b = _node_compound_name(node_b)
+
+    score_a = direction_a.get("confidence_score") if direction_a else None
+    score_b = direction_b.get("confidence_score") if direction_b else None
+
+    if score_a is not None and score_b is not None:
+        if score_a > score_b:
+            return (
+                f"My compound under the published protocol remains more favorable structurally "
+                f"({score_a:.2f} vs {score_b:.2f}), suggesting protocol transfer explains more of the IC50 gap."
+            )
+        if score_b > score_a:
+            return (
+                f"The literature compound holds the stronger docking readout under your assay "
+                f"({score_b:.2f} vs {score_a:.2f}), suggesting the discrepancy may reflect compound-specific behavior."
+            )
+        return (
+            f"Both swap directions converge on nearly identical docking confidence for {compound_a} and {compound_b}, "
+            "so the disagreement is more consistent with assay context than chemistry alone."
+        )
+
+    if score_a is not None:
+        return (
+            f"Direction A isolates {compound_a} under the published protocol and yields {score_a:.2f}; "
+            "run Direction B to complete the cross-protocol comparison."
+        )
+
+    if score_b is not None:
+        return (
+            f"Direction B isolates {compound_b} under your private assay and yields {score_b:.2f}; "
+            "run Direction A to complete the cross-protocol comparison."
+        )
+
+    return "DiffDock did not return a usable score for either direction."
+
+
+def _sse_event(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+async def _run_direction_experiment(primary_node: ClaimNode, protocol_node: ClaimNode, direction: str) -> dict[str, Any]:
+    compound = _node_compound_name(primary_node)
+    conditions = _node_conditions(protocol_node)
+    timestamp = int(time.time())
+
+    if not _has_tamarind_api_key():
+        base_score = -1.42 if direction == "a" else -2.81
+        score = round(base_score + random.uniform(-0.3, 0.3), 3)
+        return {
+            "job_id": f"dialectic-mock-{timestamp}-{direction}",
+            "compound": compound,
+            "conditions": conditions,
+            "confidence_score": score,
+            "estimated_ic50_nm": _confidence_to_ic50_nm(score),
+            "verdict": _binding_label(score),
+            "mock": True,
+        }
+
+    docking_node = primary_node.model_copy(
+        update={
+            "node_id": f"{primary_node.node_id}-experiment-{direction}",
+            "claim_text": f"{compound} under {conditions}",
+            "cell_line": protocol_node.cell_line or primary_node.cell_line,
+            "predicate_relation": protocol_node.predicate_relation or primary_node.predicate_relation,
+            "quantitative_value": primary_node.quantitative_value,
+            "quantitative_unit": primary_node.quantitative_unit,
+        }
+    )
+    protocol_context = protocol_node.model_copy(
+        update={
+            "node_id": f"{protocol_node.node_id}-protocol-{direction}",
+            "subject_name": protocol_node.cell_line or protocol_node.predicate_relation or "Protocol context",
+            "subject_type": "assay_context",
+            "object_name": protocol_node.organism or protocol_node.object_name or "Reference context",
+            "object_type": "assay_context",
+        }
+    )
+
+    verdict = await run_tamarind_arbiter(docking_node, protocol_context)
+    score = verdict.get("binding_affinity_a")
+
+    return {
+        "job_id": verdict.get("tamarind_job_id") or f"dialectic-live-{timestamp}-{direction}",
+        "compound": verdict.get("compound_a") or compound,
+        "conditions": conditions,
+        "confidence_score": score,
+        "estimated_ic50_nm": _confidence_to_ic50_nm(score),
+        "verdict": verdict.get("verdict") or _binding_label(score),
+        "mock": bool(verdict.get("mock")),
+    }
 
 
 def _build_map_context(selected_nodes: list[ClaimNode], session_nodes: list[ClaimNode]) -> dict[str, Any]:
@@ -568,6 +738,47 @@ async def ingest_xlsx_route(
     except Exception as exc:
         _update_session_state(session.session_id, status="error", progress=100, error_message=str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/experiment/run")
+async def run_experiment_endpoint(request: ExperimentRequest) -> StreamingResponse:
+    session = get_session(request.session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    node_map = {node.node_id: node for node in session.nodes}
+    node_a = node_map.get(request.node_a_id)
+    node_b = node_map.get(request.node_b_id)
+    if not node_a or not node_b:
+        raise HTTPException(404, "Node not found")
+
+    async def event_stream() -> AsyncGenerator[str, None]:
+        def log(message: str) -> str:
+            return f"data: {json.dumps({'event': 'log', 'message': message})}\n\n"
+
+        yield log("Initializing experiment runner...")
+        yield log(f"Node A: {node_a.subject_name} ({node_a.source_type})")
+        yield log(f"Node B: {node_b.subject_name} ({node_b.source_type})")
+        yield log("Submitting DiffDock jobs to Tamarind...")
+
+        try:
+            results = await tamarind_run_experiment(node_a, node_b, request.direction)
+            yield log("DiffDock complete. Parsing confidence scores...")
+            yield log("SurfDock running in background (~20 min)...")
+            yield log("Generating visualizations...")
+            yield f"data: {json.dumps({'event': 'complete', 'results': results})}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'event': 'error', 'message': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/demo")

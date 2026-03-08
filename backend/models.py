@@ -73,3 +73,10 @@ class OracleRequest(BaseModel):
     messages: List[dict]
     is_bag_query: bool = False
     bag_name: Optional[str] = None
+
+
+class ExperimentRequest(BaseModel):
+    session_id: str
+    node_a_id: str
+    node_b_id: str
+    direction: str = "both"

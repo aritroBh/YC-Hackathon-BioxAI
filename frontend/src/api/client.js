@@ -174,3 +174,83 @@ export async function streamOracle(sessionId, selectedNodeIds, messages, bagName
 
   return response.body;
 }
+
+export const runExperiment = async (
+  sessionId,
+  nodeAId,
+  nodeBId,
+  direction,
+  onLog,
+  onComplete,
+) => {
+  const response = await fetch(`${BASE}/experiment/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: sessionId,
+      node_a_id: nodeAId,
+      node_b_id: nodeBId,
+      direction,
+    }),
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `Experiment run failed: ${response.status}`);
+  }
+
+  if (!response.body) {
+    throw new Error("Experiment streaming is not available in this browser.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let completedResults = null;
+
+  const processChunk = (chunk) => {
+    const events = chunk.split("\n\n");
+    buffer = events.pop() ?? "";
+
+    events.forEach((eventBlock) => {
+      const dataLines = eventBlock
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim());
+
+      if (dataLines.length === 0) {
+        return;
+      }
+
+      try {
+        const payload = JSON.parse(dataLines.join("\n"));
+        if (payload.event === "log") {
+          onLog?.(payload.message);
+        }
+        if (payload.event === "complete") {
+          completedResults = payload.results;
+          onComplete?.(payload.results);
+        }
+      } catch (error) {
+        console.error("Failed to parse experiment stream event", error);
+      }
+    });
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    processChunk(buffer);
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    processChunk(`${buffer}\n\n`);
+  }
+
+  return completedResults;
+};

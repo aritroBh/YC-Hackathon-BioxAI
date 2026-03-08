@@ -54,6 +54,33 @@ async def submit_diffdock(compound_key: str, job_name: str) -> bool:
         print(f"submit error: {e}")
     return False
 
+
+async def submit_surfdock(compound_key: str, job_name: str) -> bool:
+    smiles = COMPOUND_SMILES.get(compound_key)
+    if not smiles:
+        return False
+    payload = {
+        "jobName": job_name,
+        "type": "surfdock",
+        "settings": {
+            "proteinFile": "6OIM",
+            "ligandFormat": "SMILES",
+            "ligandSmiles": smiles,
+            "numSamples": 10,
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                f"{BASE}submit-job",
+                headers={"x-api-key": TAMARIND_API_KEY},
+                json=payload
+            )
+            return r.status_code == 200
+    except Exception as e:
+        print(f"surfdock submit error: {e}")
+        return False
+
 async def poll_job(job_name: str, timeout: int = 180, interval: int = 10) -> Optional[dict]:
     deadline = time.time() + timeout
     async with httpx.AsyncClient(timeout=15) as client:
@@ -231,3 +258,98 @@ async def run_tamarind_arbiter(node_a, node_b) -> dict:
         "compound_b": compound_b,
         "mock": False,
     }
+
+
+async def run_experiment(
+    node_a,
+    node_b,
+    direction: str,
+) -> dict:
+    """
+    Direction A: node_a compound, node_b conditions
+    Direction B: node_b compound, node_a conditions
+    Returns streaming-ready results dict.
+    """
+    comp_a = normalize_compound(node_a.subject_name) or normalize_compound(node_a.object_name)
+    comp_b = normalize_compound(node_b.subject_name) or normalize_compound(node_b.object_name)
+
+    if not TAMARIND_API_KEY:
+        import random
+
+        results = {}
+        if direction in ("a", "both"):
+            score = -1.42 + random.uniform(-0.3, 0.3)
+            results["direction_a"] = {
+                "job_id": "mock-diffdock-a",
+                "surfdock_job_id": "mock-surfdock-a",
+                "compound": comp_a or "sotorasib",
+                "conditions": f"cell line: {node_b.cell_line or 'H358'}",
+                "diffdock_score": score,
+                "surfdock_score": None,
+                "surfdock_status": "running",
+                "estimated_ic50_nm": round(10 ** (-score * 0.8) * 100, 2),
+                "verdict": "moderate_binding",
+                "mock": True,
+            }
+        if direction in ("b", "both"):
+            score = -2.81 + random.uniform(-0.3, 0.3)
+            results["direction_b"] = {
+                "job_id": "mock-diffdock-b",
+                "surfdock_job_id": "mock-surfdock-b",
+                "compound": comp_b or "adagrasib",
+                "conditions": f"cell line: {node_a.cell_line or 'MiaPaCa-2'}",
+                "diffdock_score": score,
+                "surfdock_score": None,
+                "surfdock_status": "running",
+                "estimated_ic50_nm": round(10 ** (-score * 0.8) * 100, 2),
+                "verdict": "strong_binding",
+                "mock": True,
+            }
+        results["friction_timeline"] = [
+            0.1,
+            round((node_a.friction_score or 0.85) * 0.4, 2),
+            round((node_a.friction_score or 0.85) * 0.7, 2),
+            node_a.friction_score or 0.85,
+        ]
+        return results
+
+    ts = int(time.time())
+    results = {}
+
+    async def run_direction(compound_key, conditions_node, dir_label):
+        dd_job = f"dialectic-exp-{compound_key}-{dir_label}-{ts}"
+        dd_submitted = await submit_diffdock(compound_key, dd_job)
+        dd_score = None
+        if dd_submitted:
+            job_result = await poll_job(dd_job, timeout=180)
+            if job_result:
+                dd_score = await get_confidence_score(dd_job)
+
+        sd_job = f"dialectic-surf-{compound_key}-{dir_label}-{ts}"
+        sd_submitted = await submit_surfdock(compound_key, sd_job)
+
+        return {
+            "job_id": dd_job,
+            "surfdock_job_id": sd_job if sd_submitted else None,
+            "compound": compound_key,
+            "conditions": f"cell line: {conditions_node.cell_line or 'unknown'}",
+            "diffdock_score": dd_score,
+            "surfdock_score": None,
+            "surfdock_status": "running" if sd_submitted else "failed",
+            "estimated_ic50_nm": round(10 ** (-(dd_score or -1.5) * 0.8) * 100, 2),
+            "verdict": "strong_binding" if (dd_score or -99) > -1.5 else "moderate_binding",
+            "mock": False,
+        }
+
+    if direction in ("a", "both") and comp_a:
+        results["direction_a"] = await run_direction(comp_a, node_b, "a")
+    if direction in ("b", "both") and comp_b:
+        results["direction_b"] = await run_direction(comp_b, node_a, "b")
+
+    results["friction_timeline"] = [
+        0.1,
+        round((node_a.friction_score or 0.85) * 0.4, 2),
+        round((node_a.friction_score or 0.85) * 0.7, 2),
+        node_a.friction_score or 0.85,
+    ]
+    return results
