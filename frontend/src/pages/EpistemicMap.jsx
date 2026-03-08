@@ -24,6 +24,7 @@ export default function EpistemicMap() {
   const [activeBagId, setActiveBagId] = useState(null);
   const [showCriticalOnly, setShowCriticalOnly] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [viewMode, setViewMode] = useState("2D");
   const [viewportWidth, setViewportWidth] = useState(
     typeof window !== "undefined" ? window.innerWidth : 1440,
   );
@@ -551,6 +552,7 @@ export default function EpistemicMap() {
           nodes={visibleNodes}
           allNodes={nodes}
           selectedIds={selectedIds}
+          viewMode={viewMode}
           onSelectNode={handleSelectNode}
           onMultiSelect={handleMultiSelect}
           onNodeInspect={(node) => {
@@ -559,11 +561,48 @@ export default function EpistemicMap() {
           }}
         />
 
+        <div
+          style={{
+            position: "absolute",
+            bottom: 14,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 30,
+            display: "flex",
+            background: "rgba(12,14,18,0.92)",
+            border: "1px solid #1e2430",
+            borderRadius: 4,
+            backdropFilter: "blur(8px)",
+            overflow: "hidden",
+          }}
+        >
+          {["2D", "2.5D", "3D"].map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => setViewMode(mode)}
+              style={{
+                background: viewMode === mode ? "rgba(0,229,160,0.15)" : "transparent",
+                color: viewMode === mode ? "#00e5a0" : "#6b7590",
+                border: "none",
+                borderRight: mode !== "3D" ? "1px solid #1e2430" : "none",
+                fontFamily: "'DM Mono',monospace",
+                fontSize: 11,
+                padding: "6px 16px",
+                cursor: "pointer",
+                transition: "all 0.2s",
+              }}
+            >
+              {mode}
+            </button>
+          ))}
+        </div>
+
         {nodes.length > 0 && selectedIds.length === 0 ? (
           <div
             style={{
               position: "absolute",
-              bottom: 14,
+              bottom: 58,
               left: "50%",
               transform: "translateX(-50%)",
               background: "rgba(12,14,18,0.9)",

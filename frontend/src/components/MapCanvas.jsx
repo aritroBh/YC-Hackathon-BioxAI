@@ -520,31 +520,53 @@ function drawClusterOutlines(ctx, clusterLabels, nodesByCluster, worldToScreen, 
   void clusterLabels;
 }
 
-function drawNode(ctx, node, sx, sy, zoom, isSelected, isHovered) {
+function drawNode(ctx, node, sx, sy, zoom, isSelected, isHovered, viewMode) {
   const zoomLevel = getZoomLevel(zoom);
   const friction = node.friction_score ?? 0;
   const [red, green, blue] = getNodeColor(node);
-  const baseRadius = getBaseRadius(node, zoomLevel);
+  let drawX = sx;
+  let drawY = sy;
+  let scaleMult = 1;
+
+  if (viewMode === "3D" && node.proj) {
+    drawX = node.proj.sx;
+    drawY = node.proj.sy;
+    scaleMult = node.proj.scale;
+  }
+
+  const baseRadius = getBaseRadius(node, zoomLevel) * scaleMult;
+
+  if (viewMode === "2.5D" && friction >= 0.6) {
+    ctx.shadowColor = `rgba(${red}, ${green}, ${blue}, 0.6)`;
+    ctx.shadowBlur = 15 + (friction * 4);
+    ctx.shadowOffsetX = 6;
+    ctx.shadowOffsetY = 8 + (friction * 4);
+  } else {
+    ctx.shadowColor = "transparent";
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
+  }
 
   if (zoomLevel === "node" || zoomLevel === "detail") {
     const glowRadius = baseRadius * (friction >= 0.6 ? 4.5 : 3);
     const glowAlpha = friction >= 0.6 ? 0.18 : 0.08;
-    const gradient = ctx.createRadialGradient(sx, sy, baseRadius * 0.5, sx, sy, glowRadius);
+    const gradient = ctx.createRadialGradient(drawX, drawY, baseRadius * 0.5, drawX, drawY, glowRadius);
     gradient.addColorStop(0, `rgba(${red},${green},${blue},${glowAlpha})`);
     gradient.addColorStop(1, `rgba(${red},${green},${blue},0)`);
     ctx.beginPath();
-    ctx.arc(sx, sy, glowRadius, 0, Math.PI * 2);
+    ctx.arc(drawX, drawY, glowRadius, 0, Math.PI * 2);
     ctx.fillStyle = gradient;
     ctx.fill();
   }
 
   ctx.beginPath();
-  ctx.arc(sx, sy, baseRadius, 0, Math.PI * 2);
+  ctx.arc(drawX, drawY, baseRadius, 0, Math.PI * 2);
 
   if (zoomLevel === "galaxy") {
     ctx.fillStyle = `rgb(${red},${green},${blue})`;
   } else {
-    const coreGradient = ctx.createRadialGradient(sx - (baseRadius * 0.3), sy - (baseRadius * 0.3), 0, sx, sy, baseRadius);
+    const coreGradient = ctx.createRadialGradient(drawX - (baseRadius * 0.3), drawY - (baseRadius * 0.3), 0, drawX, drawY, baseRadius);
     coreGradient.addColorStop(0, "rgba(255,255,255,0.95)");
     coreGradient.addColorStop(0.25, `rgba(${red},${green},${blue},1)`);
     coreGradient.addColorStop(1, `rgba(${Math.max(0, red - 40)},${Math.max(0, green - 40)},${Math.max(0, blue - 40)},0.9)`);
@@ -554,13 +576,13 @@ function drawNode(ctx, node, sx, sy, zoom, isSelected, isHovered) {
 
   if (zoomLevel !== "galaxy") {
     ctx.beginPath();
-    ctx.arc(sx, sy, baseRadius, 0, Math.PI * 2);
+    ctx.arc(drawX, drawY, baseRadius, 0, Math.PI * 2);
     ctx.strokeStyle = `rgba(${red},${green},${blue},0.9)`;
     ctx.lineWidth = 0.8;
     ctx.stroke();
 
     ctx.beginPath();
-    ctx.arc(sx, sy, baseRadius + 1.2, 0, Math.PI * 2);
+    ctx.arc(drawX, drawY, baseRadius + 1.2, 0, Math.PI * 2);
     ctx.strokeStyle = `rgba(${red},${green},${blue},0.2)`;
     ctx.lineWidth = 0.5;
     ctx.stroke();
@@ -570,18 +592,18 @@ function drawNode(ctx, node, sx, sy, zoom, isSelected, isHovered) {
     const size = baseRadius * 1.7;
     ctx.strokeStyle = `rgba(${red},${green},${blue},0.7)`;
     ctx.lineWidth = 0.8;
-    ctx.strokeRect(sx - (size / 2), sy - (size / 2), size, size);
+    ctx.strokeRect(drawX - (size / 2), drawY - (size / 2), size, size);
   }
 
   if (isSelected) {
     ctx.beginPath();
-    ctx.arc(sx, sy, baseRadius + 4, 0, Math.PI * 2);
+    ctx.arc(drawX, drawY, baseRadius + 4, 0, Math.PI * 2);
     ctx.strokeStyle = "rgba(255,255,255,0.85)";
     ctx.lineWidth = 1.5;
     ctx.stroke();
 
     ctx.beginPath();
-    ctx.arc(sx, sy, baseRadius + 6, 0, Math.PI * 2);
+    ctx.arc(drawX, drawY, baseRadius + 6, 0, Math.PI * 2);
     ctx.strokeStyle = `rgba(${red},${green},${blue},0.3)`;
     ctx.lineWidth = 0.8;
     ctx.stroke();
@@ -589,11 +611,16 @@ function drawNode(ctx, node, sx, sy, zoom, isSelected, isHovered) {
 
   if (isHovered && !isSelected) {
     ctx.beginPath();
-    ctx.arc(sx, sy, baseRadius + 5, 0, Math.PI * 2);
+    ctx.arc(drawX, drawY, baseRadius + 5, 0, Math.PI * 2);
     ctx.strokeStyle = `rgba(${red},${green},${blue},0.5)`;
     ctx.lineWidth = 1;
     ctx.stroke();
   }
+
+  ctx.shadowColor = "transparent";
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
 }
 
 function drawLasso(ctx, points) {
@@ -617,9 +644,9 @@ function drawLasso(ctx, points) {
   ctx.fill();
 }
 
-function drawMarkers(ctx, markers, worldToScreen, canvas) {
+function drawMarkers(ctx, markers, projectPoint, canvas) {
   markers.forEach((marker) => {
-    const { sx, sy } = worldToScreen(marker.wx, marker.wy, canvas);
+    const { sx, sy } = projectPoint(marker.wx, marker.wy, canvas);
     const size = 8;
 
     ctx.beginPath();
@@ -651,6 +678,7 @@ export default function MapCanvas({
   nodes = [],
   allNodes = nodes,
   selectedIds = [],
+  viewMode = "2D",
   onSelectNode,
   onMultiSelect,
   onHoverNode,
@@ -659,7 +687,7 @@ export default function MapCanvas({
   const wrapperRef = useRef(null);
   const canvasRef = useRef(null);
   const minimapRef = useRef(null);
-  const cameraRef = useRef({ x: 0, y: 0, zoom: 12 });
+  const cameraRef = useRef({ x: 0, y: 0, zoom: 12, pitch: 0.8, yaw: 0.5 });
   const animationRef = useRef(null);
   const isDragging = useRef(false);
   const dragStart = useRef(null);
@@ -776,6 +804,47 @@ export default function MapCanvas({
     };
   }, []);
 
+  const project3D = useCallback((wx, wy, wz, canvas) => {
+    const camera = cameraRef.current;
+    let dx = wx + camera.x;
+    let dy = wy + camera.y;
+    const dz = wz;
+
+    const cosYaw = Math.cos(camera.yaw);
+    const sinYaw = Math.sin(camera.yaw);
+    const rx = dx * cosYaw - dy * sinYaw;
+    const ry = dx * sinYaw + dy * cosYaw;
+
+    const cosPitch = Math.cos(camera.pitch);
+    const sinPitch = Math.sin(camera.pitch);
+    const rz = ry * sinPitch + dz * cosPitch;
+    const finalY = ry * cosPitch - dz * sinPitch;
+
+    const fov = 800;
+    const scale = clamp(fov / (fov + (rz * 10)), 0.35, 2.4);
+
+    return {
+      sx: (canvas.width / 2) + (rx * camera.zoom * scale),
+      sy: (canvas.height / 2) + (finalY * camera.zoom * scale),
+      scale,
+      depth: rz,
+    };
+  }, []);
+
+  const projectNode = useCallback((node, canvas) => {
+    if (viewMode === "3D") {
+      return project3D(node.umap_x, node.umap_y, (node.friction_score ?? 0) * 40, canvas);
+    }
+
+    const { sx, sy } = worldToScreen(node.umap_x, node.umap_y, canvas);
+    return {
+      sx,
+      sy,
+      scale: 1,
+      depth: 0,
+    };
+  }, [project3D, viewMode, worldToScreen]);
+
   const screenToWorld = useCallback((sx, sy, canvas) => {
     const camera = cameraRef.current;
     return {
@@ -852,6 +921,8 @@ export default function MapCanvas({
       x: -centerX,
       y: -centerY,
       zoom: clampedZoom,
+      pitch: cameraRef.current.pitch ?? 0.8,
+      yaw: cameraRef.current.yaw ?? 0.5,
     };
   }, [nodes]);
 
@@ -880,9 +951,9 @@ export default function MapCanvas({
     let minDistance = Number.POSITIVE_INFINITY;
 
     renderableNodes.forEach((node) => {
-      const { sx, sy } = worldToScreen(node.umap_x, node.umap_y, canvas);
+      const { sx, sy, scale } = projectNode(node, canvas);
       const distance = Math.hypot(sx - point.x, sy - point.y);
-      const threshold = getBaseRadius(node, zoomLevel) + (zoomLevel === "galaxy" ? 8 : 10);
+      const threshold = (getBaseRadius(node, zoomLevel) * scale) + (zoomLevel === "galaxy" ? 8 : 10);
 
       if (distance <= threshold && distance < minDistance) {
         closestNode = node;
@@ -891,7 +962,7 @@ export default function MapCanvas({
     });
 
     return closestNode;
-  }, [clientToCanvasPoint, renderableNodes, worldToScreen]);
+  }, [clientToCanvasPoint, projectNode, renderableNodes]);
 
   const drawMinimap = useCallback(() => {
     const minimapCanvas = minimapRef.current;
@@ -992,24 +1063,33 @@ export default function MapCanvas({
       drawGrid(ctx, cameraRef.current, width, height);
     }
 
-    if (zoomLevel === "galaxy" || zoomLevel === "cluster") {
+    if (viewMode !== "3D" && (zoomLevel === "galaxy" || zoomLevel === "cluster")) {
       drawClusterOutlines(ctx, clusterLabels, nodesByCluster, worldToScreen, canvas, zoom);
     }
 
-    if (zoomLevel === "cluster" || zoomLevel === "node") {
+    if (viewMode !== "3D" && (zoomLevel === "cluster" || zoomLevel === "node")) {
       drawMesh(ctx, meshEdges, worldToScreen, canvas, zoom);
     }
 
-    drawContradictionEdges(ctx, renderableNodes, nodeMap, selectedIdSet, worldToScreen, canvas, zoom);
+    if (viewMode !== "3D") {
+      drawContradictionEdges(ctx, renderableNodes, nodeMap, selectedIdSet, worldToScreen, canvas, zoom);
+    }
 
     if (tool === "lasso" && lassoPoints.length > 1) {
       drawLasso(ctx, lassoPoints);
     }
 
+    let renderNodes = renderableNodes;
+    if (viewMode === "3D") {
+      renderNodes = renderableNodes
+        .map((node) => ({ ...node, proj: projectNode(node, canvas) }))
+        .sort((left, right) => right.proj.depth - left.proj.depth);
+    }
+
     let hoveredRenderableNode = null;
 
-    renderableNodes.forEach((node) => {
-      const { sx, sy } = worldToScreen(node.umap_x, node.umap_y, canvas);
+    renderNodes.forEach((node) => {
+      const { sx, sy } = node.proj ?? projectNode(node, canvas);
       if (sx < -30 || sx > width + 30 || sy < -30 || sy > height + 30) {
         return;
       }
@@ -1027,11 +1107,12 @@ export default function MapCanvas({
         zoom,
         selectedIdSet.has(node.node_id),
         false,
+        viewMode,
       );
     });
 
     if (hoveredRenderableNode) {
-      const { sx, sy } = worldToScreen(hoveredRenderableNode.umap_x, hoveredRenderableNode.umap_y, canvas);
+      const { sx, sy } = hoveredRenderableNode.proj ?? projectNode(hoveredRenderableNode, canvas);
       drawNode(
         ctx,
         hoveredRenderableNode,
@@ -1040,10 +1121,15 @@ export default function MapCanvas({
         zoom,
         selectedIdSet.has(hoveredRenderableNode.node_id),
         true,
+        viewMode,
       );
     }
 
-    drawMarkers(ctx, markers, worldToScreen, canvas);
+    const projectMarker = viewMode === "3D"
+      ? (wx, wy, currentCanvas) => project3D(wx, wy, 0, currentCanvas)
+      : worldToScreen;
+
+    drawMarkers(ctx, markers, projectMarker, canvas);
     drawMinimap();
   }, [
     clusterLabels,
@@ -1054,10 +1140,13 @@ export default function MapCanvas({
     meshEdges,
     nodeMap,
     nodesByCluster,
+    project3D,
+    projectNode,
     renderableNodes,
     selectedIdSet,
     syncCanvasSize,
     tool,
+    viewMode,
     worldToScreen,
   ]);
 
@@ -1096,8 +1185,14 @@ export default function MapCanvas({
         dragMoved.current = true;
       }
 
-      camera.x += deltaX / camera.zoom;
-      camera.y += deltaY / camera.zoom;
+      if (viewMode === "3D") {
+        camera.yaw -= deltaX * 0.01;
+        camera.pitch += deltaY * 0.01;
+        camera.pitch = clamp(camera.pitch, 0, Math.PI / 2.2);
+      } else {
+        camera.x += deltaX / camera.zoom;
+        camera.y += deltaY / camera.zoom;
+      }
       dragStart.current = { x: event.clientX, y: event.clientY };
       return;
     }
@@ -1109,7 +1204,7 @@ export default function MapCanvas({
     if (hit) {
       setTooltipPos({ x: event.clientX + 14, y: event.clientY - 10 });
     }
-  }, [clientToCanvasPoint, onHoverNode, pickNode, tool]);
+  }, [clientToCanvasPoint, onHoverNode, pickNode, tool, viewMode]);
 
   const handlePointerDown = useCallback((event) => {
     if (event.button !== 0) {
@@ -1155,7 +1250,7 @@ export default function MapCanvas({
       if (canvas && captured.length > 3) {
         const inside = renderableNodes
           .filter((node) => {
-            const { sx, sy } = worldToScreen(node.umap_x, node.umap_y, canvas);
+            const { sx, sy } = projectNode(node, canvas);
             return pointInPolygon(sx, sy, captured);
           })
           .map((node) => node.node_id);
@@ -1214,10 +1309,10 @@ export default function MapCanvas({
     onNodeInspect,
     onSelectNode,
     pickNode,
+    projectNode,
     renderableNodes,
     screenToWorld,
     tool,
-    worldToScreen,
   ]);
 
   const handlePointerLeave = useCallback(() => {
@@ -1247,13 +1342,18 @@ export default function MapCanvas({
     }
 
     const camera = cameraRef.current;
-    const { wx, wy } = screenToWorld(point.x, point.y, canvas);
     const nextZoom = clamp(camera.zoom * (event.deltaY < 0 ? 1.12 : 0.9), 4, 110);
 
+    if (viewMode === "3D") {
+      camera.zoom = nextZoom;
+      return;
+    }
+
+    const { wx, wy } = screenToWorld(point.x, point.y, canvas);
     camera.zoom = nextZoom;
     camera.x = ((point.x - (canvas.width / 2)) / nextZoom) - wx;
     camera.y = ((point.y - (canvas.height / 2)) / nextZoom) - wy;
-  }, [clientToCanvasPoint, screenToWorld]);
+  }, [clientToCanvasPoint, screenToWorld, viewMode]);
 
   const handleMinimapClick = useCallback((event) => {
     if (!worldBounds) {
