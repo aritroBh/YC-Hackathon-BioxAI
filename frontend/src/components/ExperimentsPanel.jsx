@@ -388,7 +388,8 @@ export default function ExperimentsPanel({
         headers: {
           "Content-Type": "application/json",
           "anthropic-version": "2023-06-01",
-          "x-api-key": ANTHROPIC_API_KEY,
+          "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY,
+          "anthropic-dangerous-direct-browser-access": "true",
         },
         body: JSON.stringify({
           model: ANTHROPIC_MODEL,
@@ -505,7 +506,8 @@ Write in the style of a methods/results section. Be specific about compound name
         headers: {
           "Content-Type": "application/json",
           "anthropic-version": "2023-06-01",
-          "x-api-key": ANTHROPIC_API_KEY,
+          "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY,
+          "anthropic-dangerous-direct-browser-access": "true",
         },
         body: JSON.stringify({
           model: ANTHROPIC_MODEL,
