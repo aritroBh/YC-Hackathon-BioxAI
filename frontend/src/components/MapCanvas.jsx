@@ -1,10 +1,14 @@
 import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import * as THREE from "three";
 
 const TOOLS = [
   { id: "select", icon: "\u25B6", label: "Select" },
   { id: "lasso", icon: "\u2B21", label: "Lasso" },
   { id: "marker", icon: "\u25C8", label: "Marker" },
 ];
+
+const HYPERSPECIFIC_COLOR_CACHE = new Map();
+const MAP_WORLD_PADDING = 6;
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -27,45 +31,93 @@ function getZoomLevel(zoom) {
   return "detail";
 }
 
-function getNodeColor(node) {
+function getNodeBaseHex(node) {
   const friction = node.friction_score ?? 0;
-  let color = [0, 229, 160];
-
   if (friction >= 0.85) {
-    color = [255, 48, 80];
-  } else if (friction >= 0.6) {
-    color = [255, 140, 0];
-  } else if (friction >= 0.3) {
-    color = [200, 220, 0];
-  } else if (node.polarity === "inhibits") {
-    color = [130, 80, 255];
-  } else if (node.polarity === "promotes") {
-    color = [0, 200, 255];
+    return "#ff3050";
+  }
+  if (friction >= 0.6) {
+    return "#ff8c00";
+  }
+  if (friction >= 0.3) {
+    return "#c8e600";
+  }
+  if (node.polarity === "inhibits") {
+    return "#8250ff";
+  }
+  if (node.polarity === "promotes") {
+    return "#00c8ff";
+  }
+  return "#00e5a0";
+}
+
+function hashNodeId(value) {
+  let hash = 2166136261;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
   }
 
-  if (["pdf_document", "web_url", "youtube_video"].includes(node.source_type)) {
-    return [
-      clamp(Math.round((color[0] * 0.84) + 13), 0, 255),
-      clamp(Math.round((color[1] * 0.9) + 11), 0, 255),
-      clamp(Math.round((color[2] * 0.92) + 24), 0, 255),
-    ];
+  return hash >>> 0;
+}
+
+function hashToUnit(hash) {
+  return hash / 0xffffffff;
+}
+
+function getHyperspecificColor(node) {
+  const baseHex = getNodeBaseHex(node);
+  const nodeId = String(node?.node_id ?? "");
+  const cacheKey = `${baseHex}:${nodeId}`;
+  const cachedColor = HYPERSPECIFIC_COLOR_CACHE.get(cacheKey);
+
+  if (cachedColor) {
+    return cachedColor;
   }
+
+  const primaryHash = hashNodeId(nodeId || baseHex);
+  const secondaryHash = Math.imul(primaryHash ^ 0x9e3779b9, 2246822519) >>> 0;
+  const hueOffset = (hashToUnit(primaryHash) - 0.5) * 0.04;
+  const lightnessOffset = (hashToUnit(secondaryHash) - 0.5) * 0.24;
+  const color = new THREE.Color(baseHex);
+
+  color.offsetHSL(hueOffset, 0, lightnessOffset);
+  HYPERSPECIFIC_COLOR_CACHE.set(cacheKey, color);
 
   return color;
+}
+
+function colorToRgb(color) {
+  return [
+    clamp(Math.round(color.r * 255), 0, 255),
+    clamp(Math.round(color.g * 255), 0, 255),
+    clamp(Math.round(color.b * 255), 0, 255),
+  ];
+}
+
+function offsetColor(color, hueOffset = 0, lightnessOffset = 0) {
+  const shifted = color.clone();
+  shifted.offsetHSL(hueOffset, 0, lightnessOffset);
+  return shifted;
+}
+
+function getNodeColor(node) {
+  return colorToRgb(getHyperspecificColor(node));
 }
 
 function getBaseRadius(node, zoomLevel) {
   switch (zoomLevel) {
     case "galaxy":
-      return 2;
+      return 2.5;
     case "cluster":
-      return node.source_type !== "public_abstract" ? 4 : 3;
+      return 4;
     case "node":
-      return node.source_type !== "public_abstract" ? 5.5 : 4.5;
+      return 4;
     case "detail":
-      return node.source_type !== "public_abstract" ? 7 : 6;
+      return 4;
     default:
-      return 3;
+      return 4;
   }
 }
 
@@ -82,6 +134,44 @@ function getSourceMeta(node) {
     default:
       return { label: "Literature", color: "#ffb340" };
   }
+}
+
+function formatCategoryLabel(value) {
+  const normalized = String(value ?? "")
+    .trim()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+
+  if (!normalized) {
+    return "Uncategorized";
+  }
+
+  return normalized
+    .split(" ")
+    .map((word) => (word ? `${word.charAt(0).toUpperCase()}${word.slice(1).toLowerCase()}` : ""))
+    .join(" ");
+}
+
+function getNodeCategoryKey(node) {
+  return String(
+    node?.subject_type
+    || node?.object_type
+    || node?.source_type
+    || node?.polarity
+    || "uncategorized",
+  )
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_");
+}
+
+function getCategoryClusterStyle(categoryKey) {
+  return {
+    boundaryStroke: "rgba(0, 229, 160, 0.35)",
+    edgeStroke: "rgba(0, 200, 160, 0.4)",
+    labelText: "rgba(255,255,255,0.8)",
+    labelBg: "rgba(12,14,18,0.7)",
+  };
 }
 
 function computeWorldBounds(nodes) {
@@ -107,136 +197,198 @@ function computeWorldBounds(nodes) {
   };
 }
 
-function computeClusterLabels(nodes) {
+function splitSpatialClusters(nodes, distanceThreshold) {
+  if (nodes.length <= 1) {
+    return [nodes];
+  }
+
+  const thresholdSquared = distanceThreshold * distanceThreshold;
+  const pending = new Set(nodes.map((_, index) => index));
+  const clusters = [];
+
+  while (pending.size > 0) {
+    const seedIndex = pending.values().next().value;
+    pending.delete(seedIndex);
+
+    const clusterIndices = [seedIndex];
+    const queue = [seedIndex];
+
+    while (queue.length > 0) {
+      const currentIndex = queue.pop();
+      const currentNode = nodes[currentIndex];
+      const matchedIndices = [];
+
+      pending.forEach((candidateIndex) => {
+        const candidateNode = nodes[candidateIndex];
+        const dx = currentNode.umap_x - candidateNode.umap_x;
+        const dy = currentNode.umap_y - candidateNode.umap_y;
+        if ((dx * dx) + (dy * dy) <= thresholdSquared) {
+          matchedIndices.push(candidateIndex);
+        }
+      });
+
+      matchedIndices.forEach((candidateIndex) => {
+        pending.delete(candidateIndex);
+        queue.push(candidateIndex);
+        clusterIndices.push(candidateIndex);
+      });
+    }
+
+    clusters.push(clusterIndices.map((index) => nodes[index]));
+  }
+
+  return clusters;
+}
+
+function computeCategoryClusters(nodes) {
   const renderableNodes = nodes.filter(isRenderableNode);
   if (!renderableNodes.length) {
     return [];
   }
 
-  const groups = {};
-  const hasClusterIds = renderableNodes.some((node) => node.umap_cluster_id != null);
+  const bounds = computeWorldBounds(renderableNodes);
+  const proximityThreshold = clamp(
+    Math.min(bounds?.spanX ?? 12, bounds?.spanY ?? 12) / 10,
+    3.2,
+    9.5,
+  );
+  const groups = new Map();
 
-  if (hasClusterIds) {
-    renderableNodes.forEach((node) => {
-      const key = `cluster_${node.umap_cluster_id ?? "none"}`;
-      if (!groups[key]) {
-        groups[key] = [];
-      }
-      groups[key].push(node);
-    });
-  } else {
-    const bounds = computeWorldBounds(renderableNodes);
-    if (!bounds) {
-      return [];
-    }
+  renderableNodes.forEach((node) => {
+    const categoryKey = getNodeCategoryKey(node);
+    const existingGroup = groups.get(categoryKey) ?? [];
+    existingGroup.push(node);
+    groups.set(categoryKey, existingGroup);
+  });
 
-    const cellCount = 10;
-    renderableNodes.forEach((node) => {
-      const col = clamp(
-        Math.floor(((node.umap_x - bounds.xMin) / (bounds.spanX + 0.001)) * cellCount),
-        0,
-        cellCount - 1,
-      );
-      const row = clamp(
-        Math.floor(((node.umap_y - bounds.yMin) / (bounds.spanY + 0.001)) * cellCount),
-        0,
-        cellCount - 1,
-      );
-      const key = `${row}_${col}`;
-      if (!groups[key]) {
-        groups[key] = [];
-      }
-      groups[key].push(node);
-    });
-  }
+  return Array.from(groups.entries())
+    .flatMap(([categoryKey, groupedNodes]) => {
+      const categoryLabel = formatCategoryLabel(categoryKey);
+      return splitSpatialClusters(groupedNodes, proximityThreshold)
+        .filter((clusterNodes) => clusterNodes.length >= 4)
+        .map((clusterNodes, index) => {
+          const wx = clusterNodes.reduce((sum, node) => sum + node.umap_x, 0) / clusterNodes.length;
+          const wy = clusterNodes.reduce((sum, node) => sum + node.umap_y, 0) / clusterNodes.length;
+          const averageFriction = clusterNodes.reduce((sum, node) => sum + (node.friction_score ?? 0), 0) / clusterNodes.length;
+          const maxFriction = Math.max(...clusterNodes.map((node) => node.friction_score ?? 0));
 
-  let clusterIndex = 0;
-
-  return Object.values(groups)
-    .filter((group) => group.length >= 4)
-    .map((group) => {
-      const wx = group.reduce((sum, node) => sum + node.umap_x, 0) / group.length;
-      const wy = group.reduce((sum, node) => sum + node.umap_y, 0) / group.length;
-      const frequencies = {};
-      let highestFrictionNode = group[0];
-
-      group.forEach((node) => {
-        const label = typeof node.subject_name === "string" ? node.subject_name.trim() : "";
-        if (label && label.length <= 24) {
-          frequencies[label] = (frequencies[label] ?? 0) + 1;
-        }
-        if ((node.friction_score ?? 0) > (highestFrictionNode?.friction_score ?? Number.NEGATIVE_INFINITY)) {
-          highestFrictionNode = node;
-        }
-      });
-
-      const dominantName = Object.entries(frequencies)
-        .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))[0]?.[0];
-      const fallbackName = typeof highestFrictionNode?.subject_name === "string"
-        && highestFrictionNode.subject_name.trim()
-        ? highestFrictionNode.subject_name.trim().slice(0, 24)
-        : `Cluster ${clusterIndex + 1}`;
-
-      clusterIndex += 1;
-
-      return {
-        wx,
-        wy,
-        text: dominantName ?? fallbackName,
-        nodeCount: group.length,
-        maxFriction: Math.max(...group.map((node) => node.friction_score ?? 0)),
-      };
-    });
+          return {
+            id: `${categoryKey}:${index}`,
+            categoryKey,
+            label: categoryLabel,
+            nodeCount: clusterNodes.length,
+            nodes: clusterNodes,
+            wx,
+            wy,
+            averageFriction,
+            maxFriction,
+          };
+        });
+    })
+    .sort((left, right) => (
+      right.nodeCount - left.nodeCount
+      || right.maxFriction - left.maxFriction
+      || left.label.localeCompare(right.label)
+    ));
 }
 
-function buildClusterMesh(nodes, clusterGroups) {
+function distanceBetweenPoints(a, b) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return Math.sqrt((dx * dx) + (dy * dy));
+}
+
+function buildMinimumSpanningTreeIndices(nodes) {
+  if (nodes.length < 2) {
+    return [];
+  }
+
+  const visited = new Set([0]);
   const edges = [];
 
-  Object.values(clusterGroups).forEach((group) => {
-    if (group.length < 2) {
-      return;
-    }
+  while (visited.size < nodes.length) {
+    let bestEdge = null;
 
-    group.forEach((nodeA) => {
-      const neighbors = group
-        .filter((nodeB) => nodeB.node_id !== nodeA.node_id)
-        .map((nodeB) => {
-          const dx = nodeA.umap_x - nodeB.umap_x;
-          const dy = nodeA.umap_y - nodeB.umap_y;
-          return {
-            node: nodeB,
-            dist: Math.sqrt(dx * dx + dy * dy),
-          };
-        })
-        .sort((left, right) => left.dist - right.dist)
-        .slice(0, 3);
-
-      neighbors.forEach(({ node: nodeB, dist }) => {
-        if (dist > 8) {
+    visited.forEach((fromIndex) => {
+      nodes.forEach((toNode, toIndex) => {
+        if (visited.has(toIndex)) {
           return;
         }
 
-        const pairKey = [nodeA.node_id, nodeB.node_id].sort().join("::");
-        edges.push({
-          pairKey,
-          ax: nodeA.umap_x,
-          ay: nodeA.umap_y,
-          bx: nodeB.umap_x,
-          by: nodeB.umap_y,
-          friction: Math.max(nodeA.friction_score ?? 0, nodeB.friction_score ?? 0),
-        });
+        const fromNode = nodes[fromIndex];
+        const dist = Math.hypot(fromNode.umap_x - toNode.umap_x, fromNode.umap_y - toNode.umap_y);
+        if (!bestEdge || dist < bestEdge.dist) {
+          bestEdge = { fromIndex, toIndex, dist };
+        }
       });
+    });
+
+    if (!bestEdge) {
+      break;
+    }
+
+    visited.add(bestEdge.toIndex);
+    edges.push(bestEdge);
+  }
+
+  return edges;
+}
+
+function buildClusterConstellationEdges(clusters, neighborCount = 3) {
+  const edges = new Map();
+
+  clusters.forEach((cluster) => {
+    const clusterNodes = cluster.nodes;
+    if (clusterNodes.length < 2) {
+      return;
+    }
+
+    const addEdge = (leftIndex, rightIndex) => {
+      if (leftIndex === rightIndex) {
+        return;
+      }
+
+      const nodeA = clusterNodes[leftIndex];
+      const nodeB = clusterNodes[rightIndex];
+      const pairKey = [nodeA.node_id, nodeB.node_id].sort().join("::");
+      const dist = Math.hypot(nodeA.umap_x - nodeB.umap_x, nodeA.umap_y - nodeB.umap_y);
+      const existing = edges.get(pairKey);
+
+      if (!existing || dist < existing.dist) {
+        edges.set(pairKey, {
+          pairKey,
+          clusterId: cluster.id,
+          nodeA,
+          nodeB,
+          dist,
+        });
+      }
+    };
+
+    buildMinimumSpanningTreeIndices(clusterNodes).forEach(({ fromIndex, toIndex }) => {
+      addEdge(fromIndex, toIndex);
+    });
+
+    clusterNodes.forEach((nodeA, leftIndex) => {
+      clusterNodes
+        .map((nodeB, rightIndex) => {
+          if (leftIndex === rightIndex) {
+            return null;
+          }
+
+          return {
+            rightIndex,
+            dist: Math.hypot(nodeA.umap_x - nodeB.umap_x, nodeA.umap_y - nodeB.umap_y),
+          };
+        })
+        .filter(Boolean)
+        .sort((left, right) => left.dist - right.dist)
+        .slice(0, neighborCount)
+        .forEach(({ rightIndex }) => addEdge(leftIndex, rightIndex));
     });
   });
 
-  const seen = new Set();
-  return edges.filter((edge) => {
-    if (seen.has(edge.pairKey)) {
-      return false;
-    }
-    seen.add(edge.pairKey);
-    return true;
-  });
+  return Array.from(edges.values());
 }
 
 function convexHull(points) {
@@ -266,6 +418,263 @@ function convexHull(points) {
   upper.pop();
   lower.pop();
   return lower.concat(upper);
+}
+
+function polygonArea(points) {
+  if (points.length < 3) {
+    return 0;
+  }
+
+  let area = 0;
+  for (let index = 0, previous = points.length - 1; index < points.length; previous = index++) {
+    area += (points[previous].x * points[index].y) - (points[index].x * points[previous].y);
+  }
+
+  return Math.abs(area / 2);
+}
+
+function expandHull(points, padding) {
+  if (points.length < 3) {
+    return points;
+  }
+
+  const centerX = points.reduce((sum, point) => sum + point.x, 0) / points.length;
+  const centerY = points.reduce((sum, point) => sum + point.y, 0) / points.length;
+
+  return points.map((point) => {
+    const dx = point.x - centerX;
+    const dy = point.y - centerY;
+    const dist = Math.sqrt((dx * dx) + (dy * dy)) || 1;
+    return {
+      x: point.x + ((dx / dist) * padding),
+      y: point.y + ((dy / dist) * padding),
+    };
+  });
+}
+
+function smoothClosedPolygon(points, passes = 1) {
+  let current = [...points];
+
+  for (let pass = 0; pass < passes; pass += 1) {
+    const next = [];
+
+    for (let index = 0; index < current.length; index += 1) {
+      const point = current[index];
+      const following = current[(index + 1) % current.length];
+      next.push({
+        x: (point.x * 0.75) + (following.x * 0.25),
+        y: (point.y * 0.75) + (following.y * 0.25),
+      });
+      next.push({
+        x: (point.x * 0.25) + (following.x * 0.75),
+        y: (point.y * 0.25) + (following.y * 0.75),
+      });
+    }
+
+    current = next;
+  }
+
+  return current;
+}
+
+function simplifyClosedPolygon(points, minDistance) {
+  if (points.length < 4) {
+    return points;
+  }
+
+  const simplified = [];
+  points.forEach((point) => {
+    const previous = simplified[simplified.length - 1];
+    if (!previous || distanceBetweenPoints(previous, point) >= minDistance) {
+      simplified.push(point);
+    }
+  });
+
+  if (simplified.length > 2 && distanceBetweenPoints(simplified[0], simplified[simplified.length - 1]) < minDistance) {
+    simplified.pop();
+  }
+
+  return simplified.length >= 3 ? simplified : points;
+}
+
+function buildAlphaShapeOutline(points, padding) {
+  if (points.length < 3) {
+    return points;
+  }
+
+  if (points.length < 5) {
+    return expandHull(convexHull(points), Math.max(4, padding * 0.45));
+  }
+
+  const bounds = points.reduce((acc, point) => ({
+    minX: Math.min(acc.minX, point.x),
+    maxX: Math.max(acc.maxX, point.x),
+    minY: Math.min(acc.minY, point.y),
+    maxY: Math.max(acc.maxY, point.y),
+  }), {
+    minX: Number.POSITIVE_INFINITY,
+    maxX: Number.NEGATIVE_INFINITY,
+    minY: Number.POSITIVE_INFINITY,
+    maxY: Number.NEGATIVE_INFINITY,
+  });
+
+  let cellSize = clamp(padding * 0.42, 5, 9);
+  const influence = Math.max(8, padding * 0.95);
+  let cols = Math.max(6, Math.ceil(((bounds.maxX - bounds.minX) + (influence * 2)) / cellSize));
+  let rows = Math.max(6, Math.ceil(((bounds.maxY - bounds.minY) + (influence * 2)) / cellSize));
+
+  while ((cols * rows) > 6400) {
+    cellSize += 1;
+    cols = Math.max(6, Math.ceil(((bounds.maxX - bounds.minX) + (influence * 2)) / cellSize));
+    rows = Math.max(6, Math.ceil(((bounds.maxY - bounds.minY) + (influence * 2)) / cellSize));
+  }
+
+  const originX = bounds.minX - influence;
+  const originY = bounds.minY - influence;
+  let occupancy = new Uint8Array(cols * rows);
+
+  points.forEach((point) => {
+    const centerCol = Math.floor((point.x - originX) / cellSize);
+    const centerRow = Math.floor((point.y - originY) / cellSize);
+    const radiusCells = Math.ceil(influence / cellSize);
+
+    for (let row = Math.max(0, centerRow - radiusCells); row <= Math.min(rows - 1, centerRow + radiusCells); row += 1) {
+      for (let col = Math.max(0, centerCol - radiusCells); col <= Math.min(cols - 1, centerCol + radiusCells); col += 1) {
+        const sampleX = originX + ((col + 0.5) * cellSize);
+        const sampleY = originY + ((row + 0.5) * cellSize);
+        if (Math.hypot(sampleX - point.x, sampleY - point.y) <= influence) {
+          occupancy[(row * cols) + col] = 1;
+        }
+      }
+    }
+  });
+
+  for (let pass = 0; pass < 1; pass += 1) {
+    const next = occupancy.slice();
+
+    for (let row = 1; row < rows - 1; row += 1) {
+      for (let col = 1; col < cols - 1; col += 1) {
+        const index = (row * cols) + col;
+        if (occupancy[index]) {
+          continue;
+        }
+
+        let neighbors = 0;
+        for (let deltaRow = -1; deltaRow <= 1; deltaRow += 1) {
+          for (let deltaCol = -1; deltaCol <= 1; deltaCol += 1) {
+            if (!deltaRow && !deltaCol) {
+              continue;
+            }
+
+            neighbors += occupancy[((row + deltaRow) * cols) + (col + deltaCol)];
+          }
+        }
+
+        if (neighbors >= 5) {
+          next[index] = 1;
+        }
+      }
+    }
+
+    occupancy = next;
+  }
+
+  const boundaryPoints = [];
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      const index = (row * cols) + col;
+      if (!occupancy[index]) {
+        continue;
+      }
+
+      let exposed = false;
+      for (let deltaRow = -1; deltaRow <= 1 && !exposed; deltaRow += 1) {
+        for (let deltaCol = -1; deltaCol <= 1; deltaCol += 1) {
+          if (!deltaRow && !deltaCol) {
+            continue;
+          }
+
+          const nextRow = row + deltaRow;
+          const nextCol = col + deltaCol;
+          if (nextRow < 0 || nextCol < 0 || nextRow >= rows || nextCol >= cols || !occupancy[(nextRow * cols) + nextCol]) {
+            exposed = true;
+            break;
+          }
+        }
+      }
+
+      if (exposed) {
+        boundaryPoints.push({
+          x: originX + ((col + 0.5) * cellSize),
+          y: originY + ((row + 0.5) * cellSize),
+        });
+      }
+    }
+  }
+
+  if (boundaryPoints.length < 4) {
+    return expandHull(convexHull(points), Math.max(4, padding * 0.45));
+  }
+
+  const centerX = boundaryPoints.reduce((sum, point) => sum + point.x, 0) / boundaryPoints.length;
+  const centerY = boundaryPoints.reduce((sum, point) => sum + point.y, 0) / boundaryPoints.length;
+  const averageRadius = boundaryPoints.reduce((sum, point) => sum + Math.hypot(point.x - centerX, point.y - centerY), 0) / boundaryPoints.length;
+  const sampleCount = clamp(Math.round(Math.sqrt(boundaryPoints.length) * 1.5), 10, 28);
+  const angleStep = (Math.PI * 2) / sampleCount;
+  let radialSamples = Array.from({ length: sampleCount }, () => null);
+
+  boundaryPoints.forEach((point) => {
+    const angle = Math.atan2(point.y - centerY, point.x - centerX);
+    const radius = Math.hypot(point.x - centerX, point.y - centerY);
+    const normalized = ((angle + Math.PI) / (Math.PI * 2)) * sampleCount;
+    const index = ((Math.floor(normalized) % sampleCount) + sampleCount) % sampleCount;
+    const sample = radialSamples[index];
+
+    if (!sample || radius > sample.radius) {
+      radialSamples[index] = { radius };
+    }
+  });
+
+  radialSamples = radialSamples.map((sample, index, collection) => {
+    if (sample) {
+      return sample;
+    }
+
+    let previousIndex = (index + collection.length - 1) % collection.length;
+    while (!collection[previousIndex] && previousIndex !== index) {
+      previousIndex = (previousIndex + collection.length - 1) % collection.length;
+    }
+
+    let nextIndex = (index + 1) % collection.length;
+    while (!collection[nextIndex] && nextIndex !== index) {
+      nextIndex = (nextIndex + 1) % collection.length;
+    }
+
+    const previousRadius = collection[previousIndex]?.radius ?? averageRadius;
+    const nextRadius = collection[nextIndex]?.radius ?? averageRadius;
+    return { radius: (previousRadius + nextRadius) / 2 };
+  });
+
+  for (let pass = 0; pass < 2; pass += 1) {
+    radialSamples = radialSamples.map((sample, index, collection) => {
+      const previous = collection[(index + collection.length - 1) % collection.length];
+      const next = collection[(index + 1) % collection.length];
+      return {
+        radius: Math.max(averageRadius * 0.55, (sample.radius * 0.58) + (((previous.radius + next.radius) / 2) * 0.42)),
+      };
+    });
+  }
+
+  const outline = radialSamples.map((sample, index) => {
+    const angle = -Math.PI + (index * angleStep);
+    const radius = sample.radius + (padding * 0.18);
+    return {
+      x: centerX + (Math.cos(angle) * radius),
+      y: centerY + (Math.sin(angle) * radius),
+    };
+  });
+
+  return simplifyClosedPolygon(smoothClosedPolygon(outline, 1), Math.max(4, cellSize * 0.85));
 }
 
 function pointInPolygon(px, py, polygon) {
@@ -356,44 +765,25 @@ function drawGrid(ctx, camera, width, height) {
   ctx.restore();
 }
 
-function drawMesh(ctx, meshEdges, worldToScreen, canvas, zoom) {
-  const zoomLevel = getZoomLevel(zoom);
-
+function drawConstellationEdges(ctx, clusterEdges, projectPoint, canvas) {
   const width = canvas.width;
   const height = canvas.height;
 
-  meshEdges.forEach((edge) => {
-    const { sx: ax, sy: ay } = worldToScreen(edge.ax, edge.ay, canvas);
-    const { sx: bx, sy: by } = worldToScreen(edge.bx, edge.by, canvas);
+  clusterEdges.forEach((edge) => {
+    const { sx: ax, sy: ay } = projectPoint(edge.nodeA, canvas);
+    const { sx: bx, sy: by } = projectPoint(edge.nodeB, canvas);
 
     if ((ax < -50 && bx < -50) || (ax > width + 50 && bx > width + 50) || (ay < -50 && by < -50) || (ay > height + 50 && by > height + 50)) {
       return;
     }
 
-    const friction = edge.friction;
-    let red = 0;
-    let green = 229;
-    let blue = 160;
-
-    if (friction >= 0.85) {
-      red = 255;
-      green = 48;
-      blue = 80;
-    } else if (friction >= 0.6) {
-      red = 255;
-      green = 140;
-      blue = 0;
-    } else if (friction >= 0.3) {
-      red = 180;
-      green = 210;
-      blue = 40;
-    }
-
     ctx.beginPath();
     ctx.moveTo(ax, ay);
     ctx.lineTo(bx, by);
-    ctx.strokeStyle = `rgba(${red},${green},${blue},${zoomLevel === "cluster" ? 0.18 : 0.30})`;
-    ctx.lineWidth = zoomLevel === "cluster" ? 0.5 : 0.8;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "rgba(0, 200, 160, 0.4)";
+    ctx.lineWidth = 1;
     ctx.setLineDash([]);
     ctx.stroke();
   });
@@ -465,86 +855,252 @@ function drawContradictionEdges(ctx, nodes, nodeMap, selectedIdSet, worldToScree
   });
 }
 
-function drawClusterOutlines(ctx, clusterLabels, nodesByCluster, worldToScreen, canvas, zoom) {
-  const zoomLevel = getZoomLevel(zoom);
-  if (zoomLevel === "node" || zoomLevel === "detail") {
-    return;
+function projectCategoryClusterOverlay(cluster, canvas, viewMode, zoom, worldToScreen, project3D) {
+  const screenPoints = cluster.nodes
+    .map((node) => {
+      if (viewMode === "3D") {
+        const projected = project3D(node.umap_x, node.umap_y, 0, canvas);
+        return { x: projected.sx, y: projected.sy };
+      }
+
+      const { sx, sy } = worldToScreen(node.umap_x, node.umap_y, canvas);
+      return { x: sx, y: sy };
+    })
+    .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+
+  if (screenPoints.length < 3) {
+    return null;
   }
 
-  const hullAlpha = zoomLevel === "galaxy" ? 0.3 : 0.2;
+  const padding = viewMode === "3D"
+    ? 14
+    : clamp(8 + (zoom / 32), 8, 14);
+  const hull = buildAlphaShapeOutline(screenPoints, padding);
+  const area = polygonArea(hull);
+  const bounds = hull.reduce((acc, point) => ({
+    minX: Math.min(acc.minX, point.x),
+    maxX: Math.max(acc.maxX, point.x),
+    minY: Math.min(acc.minY, point.y),
+    maxY: Math.max(acc.maxY, point.y),
+  }), {
+    minX: Number.POSITIVE_INFINITY,
+    maxX: Number.NEGATIVE_INFINITY,
+    minY: Number.POSITIVE_INFINITY,
+    maxY: Number.NEGATIVE_INFINITY,
+  });
+  const offscreen = (
+    bounds.maxX < -120
+    || bounds.minX > canvas.width + 120
+    || bounds.maxY < -120
+    || bounds.minY > canvas.height + 120
+  );
+  const labelProjection = viewMode === "3D"
+    ? project3D(cluster.wx, cluster.wy, 0, canvas)
+    : worldToScreen(cluster.wx, cluster.wy, canvas);
 
-  Object.values(nodesByCluster).forEach((group) => {
-    if (group.length < 4) {
+  return {
+    ...cluster,
+    hull,
+    area,
+    offscreen,
+    label: {
+      text: cluster.label,
+      originSx: labelProjection.sx,
+      originSy: labelProjection.sy,
+      sx: labelProjection.sx,
+      sy: labelProjection.sy,
+      scale: 1,
+      visible: !offscreen && area >= 80,
+      depth: labelProjection.depth ?? 0,
+    },
+  };
+}
+
+function drawCategoryClusterOverlays(ctx, projectedClusters, zoomLevel, viewMode) {
+  projectedClusters.forEach((cluster) => {
+    if (!cluster || cluster.offscreen || cluster.hull.length < 3) {
       return;
     }
 
-    const screenPoints = group
-      .filter((node) => node.umap_x != null && node.umap_y != null)
-      .map((node) => {
-        const { sx, sy } = worldToScreen(node.umap_x, node.umap_y, canvas);
-        return { x: sx, y: sy };
-      });
+    const style = getCategoryClusterStyle(cluster.categoryKey);
 
-    if (screenPoints.length < 3) {
-      return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(cluster.hull[0].x, cluster.hull[0].y);
+    cluster.hull.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
+    ctx.closePath();
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.strokeStyle = style.boundaryStroke;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+    ctx.stroke();
+    ctx.restore();
+  });
+}
+
+function abbreviateClusterLabel(label) {
+  const words = String(label ?? "").trim().split(/\s+/).filter(Boolean);
+  if (words.length <= 2) {
+    return label;
+  }
+
+  return `${words.slice(0, 2).join(" ")}…`;
+}
+
+function layoutClusterLabels(projectedClusters, ctx, canvas, zoomScale) {
+  const fontSize = zoomScale < 0.6
+    ? 9
+    : zoomScale > 2
+      ? 14
+      : 11;
+  const showPill = zoomScale >= 0.6;
+  const inset = 12;
+  const entries = projectedClusters
+    .filter((cluster) => cluster?.label?.visible)
+    .map((cluster) => ({
+      id: cluster.id,
+      cluster,
+      originX: cluster.label.originSx,
+      originY: cluster.label.originSy,
+      x: cluster.label.originSx,
+      y: cluster.label.originSy,
+      text: cluster.label.text,
+      fontSize,
+      showPill,
+      width: 0,
+      height: 0,
+    }));
+
+  for (let leftIndex = 0; leftIndex < entries.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < entries.length; rightIndex += 1) {
+      const left = entries[leftIndex];
+      const right = entries[rightIndex];
+      const centerDistance = Math.hypot(left.originX - right.originX, left.originY - right.originY);
+
+      if (centerDistance < 80) {
+        const shortenLeft = left.text.length <= right.text.length;
+        if (shortenLeft) {
+          left.text = abbreviateClusterLabel(left.text);
+        } else {
+          right.text = abbreviateClusterLabel(right.text);
+        }
+      }
+    }
+  }
+
+  ctx.save();
+  entries.forEach((entry) => {
+    ctx.font = `500 ${entry.fontSize}px Syne`;
+    const measuredWidth = ctx.measureText(entry.text).width;
+    entry.width = measuredWidth + (entry.showPill ? 8 : 0);
+    entry.height = entry.fontSize + (entry.showPill ? 8 : 0);
+  });
+  ctx.restore();
+
+  const clampEntry = (entry) => {
+    entry.x = clamp(entry.x, inset + (entry.width / 2), canvas.width - inset - (entry.width / 2));
+    entry.y = clamp(entry.y, inset + (entry.height / 2), canvas.height - inset - (entry.height / 2));
+  };
+
+  entries.forEach(clampEntry);
+
+  for (let iteration = 0; iteration < 30; iteration += 1) {
+    for (let leftIndex = 0; leftIndex < entries.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < entries.length; rightIndex += 1) {
+        const left = entries[leftIndex];
+        const right = entries[rightIndex];
+        const dx = right.x - left.x;
+        const dy = right.y - left.y;
+        const overlapX = ((left.width + right.width) / 2) + 8 - Math.abs(dx);
+        const overlapY = ((left.height + right.height) / 2) + 8 - Math.abs(dy);
+
+        if (overlapX <= 0 || overlapY <= 0) {
+          continue;
+        }
+
+        let pushX = right.originX - left.originX;
+        let pushY = right.originY - left.originY;
+
+        if (Math.abs(pushX) < 0.001 && Math.abs(pushY) < 0.001) {
+          pushX = dx || 1;
+          pushY = dy || 0;
+        }
+
+        const length = Math.hypot(pushX, pushY) || 1;
+        const pushDistance = (Math.min(overlapX, overlapY) + 8) / 2;
+        const offsetX = (pushX / length) * pushDistance;
+        const offsetY = (pushY / length) * pushDistance;
+
+        left.x -= offsetX;
+        left.y -= offsetY;
+        right.x += offsetX;
+        right.y += offsetY;
+
+        clampEntry(left);
+        clampEntry(right);
+      }
+    }
+  }
+
+  const layoutById = new Map(entries.map((entry) => [entry.id, entry]));
+
+  return projectedClusters.map((cluster) => {
+    if (!cluster?.label?.visible) {
+      return cluster;
     }
 
-    const centerX = screenPoints.reduce((sum, point) => sum + point.x, 0) / screenPoints.length;
-    const centerY = screenPoints.reduce((sum, point) => sum + point.y, 0) / screenPoints.length;
-    const hull = convexHull(screenPoints).map((point) => {
-      const dx = point.x - centerX;
-      const dy = point.y - centerY;
-      const dist = Math.sqrt((dx * dx) + (dy * dy)) || 1;
-      const padding = 16;
-      return {
-        x: point.x + ((dx / dist) * padding),
-        y: point.y + ((dy / dist) * padding),
-      };
-    });
-
-    if (hull.length < 3) {
-      return;
+    const layout = layoutById.get(cluster.id);
+    if (!layout) {
+      return cluster;
     }
 
-    const maxFriction = Math.max(...group.map((node) => node.friction_score ?? 0));
-    let red = 0;
-    let green = 229;
-    let blue = 160;
+    const displacement = Math.hypot(layout.x - layout.originX, layout.y - layout.originY);
 
-    if (maxFriction >= 0.85) {
-      red = 255;
-      green = 48;
-      blue = 80;
-    } else if (maxFriction >= 0.6) {
-      red = 255;
-      green = 140;
-      blue = 0;
-    } else if (maxFriction >= 0.3) {
-      red = 180;
-      green = 210;
-      blue = 40;
+    return {
+      ...cluster,
+      label: {
+        ...cluster.label,
+        text: layout.text,
+        sx: layout.x,
+        sy: layout.y,
+        width: layout.width,
+        height: layout.height,
+        fontSize: layout.fontSize,
+        showPill: layout.showPill,
+        showLeader: displacement > 20,
+      },
+    };
+  });
+}
+
+function drawClusterLabelConnectors(ctx, projectedClusters) {
+  ctx.save();
+  ctx.strokeStyle = "#3a4055";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+
+  projectedClusters.forEach((cluster) => {
+    if (!cluster?.label?.visible || !cluster.label.showLeader) {
+      return;
     }
 
     ctx.beginPath();
-    ctx.moveTo(hull[0].x, hull[0].y);
-    hull.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
-    ctx.closePath();
-    ctx.fillStyle = `rgba(${red},${green},${blue},0.025)`;
-    ctx.fill();
-    ctx.strokeStyle = `rgba(${red},${green},${blue},${hullAlpha})`;
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4, 6]);
+    ctx.moveTo(cluster.label.originSx, cluster.label.originSy);
+    ctx.lineTo(cluster.label.sx, cluster.label.sy);
     ctx.stroke();
-    ctx.setLineDash([]);
   });
 
-  void clusterLabels;
+  ctx.setLineDash([]);
+  ctx.restore();
 }
 
 function drawNode(ctx, node, sx, sy, zoom, isSelected, isHovered, viewMode, isScoutFlagged, scoutHighlightColor) {
   const zoomLevel = getZoomLevel(zoom);
   const friction = node.friction_score ?? 0;
-  const [red, green, blue] = getNodeColor(node);
+  const baseColor = getHyperspecificColor(node);
+  const [red, green, blue] = colorToRgb(baseColor);
+  const [rimRed, rimGreen, rimBlue] = colorToRgb(offsetColor(baseColor, 0.008, 0.12));
   let drawX = sx;
   let drawY = sy;
   let scaleMult = 1;
@@ -557,11 +1113,22 @@ function drawNode(ctx, node, sx, sy, zoom, isSelected, isHovered, viewMode, isSc
 
   const baseRadius = getBaseRadius(node, zoomLevel) * scaleMult;
 
-  if (viewMode === "2.5D" && friction >= 0.6) {
-    ctx.shadowColor = `rgba(${red}, ${green}, ${blue}, 0.6)`;
-    ctx.shadowBlur = 15 + (friction * 4);
-    ctx.shadowOffsetX = 6;
-    ctx.shadowOffsetY = 8 + (friction * 4);
+  if (viewMode === "3D" && node.proj?.groundSx != null && node.proj?.groundSy != null) {
+    ctx.beginPath();
+    ctx.moveTo(node.proj.groundSx, node.proj.groundSy);
+    ctx.lineTo(drawX, drawY);
+    ctx.strokeStyle = `rgba(${red},${green},${blue},${0.14 + (friction * 0.12)})`;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.shadowColor = `rgba(${red}, ${green}, ${blue}, ${0.1 + (friction * 0.1)})`;
+    ctx.shadowBlur = 4 + (friction * 4);
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = Math.max(1, 2 * scaleMult);
+  } else if (viewMode === "2.5D") {
+    ctx.shadowColor = `rgba(${red}, ${green}, ${blue}, ${0.12 + (friction * 0.12)})`;
+    ctx.shadowBlur = 5 + (friction * 5);
+    ctx.shadowOffsetX = 2 * scaleMult;
+    ctx.shadowOffsetY = (3 + (friction * 4)) * scaleMult;
   } else {
     ctx.shadowColor = "transparent";
     ctx.shadowBlur = 0;
@@ -569,50 +1136,23 @@ function drawNode(ctx, node, sx, sy, zoom, isSelected, isHovered, viewMode, isSc
     ctx.shadowOffsetY = 0;
   }
 
-  if (zoomLevel === "node" || zoomLevel === "detail") {
-    const glowRadius = baseRadius * (friction >= 0.6 ? 4.5 : 3);
-    const glowAlpha = friction >= 0.6 ? 0.18 : 0.08;
-    const gradient = ctx.createRadialGradient(drawX, drawY, baseRadius * 0.5, drawX, drawY, glowRadius);
-    gradient.addColorStop(0, `rgba(${red},${green},${blue},${glowAlpha})`);
-    gradient.addColorStop(1, `rgba(${red},${green},${blue},0)`);
-    ctx.beginPath();
-    ctx.arc(drawX, drawY, glowRadius, 0, Math.PI * 2);
-    ctx.fillStyle = gradient;
-    ctx.fill();
-  }
-
   ctx.beginPath();
   ctx.arc(drawX, drawY, baseRadius, 0, Math.PI * 2);
-
-  if (zoomLevel === "galaxy") {
-    ctx.fillStyle = `rgb(${red},${green},${blue})`;
-  } else {
-    const coreGradient = ctx.createRadialGradient(drawX - (baseRadius * 0.3), drawY - (baseRadius * 0.3), 0, drawX, drawY, baseRadius);
-    coreGradient.addColorStop(0, "rgba(255,255,255,0.95)");
-    coreGradient.addColorStop(0.25, `rgba(${red},${green},${blue},1)`);
-    coreGradient.addColorStop(1, `rgba(${Math.max(0, red - 40)},${Math.max(0, green - 40)},${Math.max(0, blue - 40)},0.9)`);
-    ctx.fillStyle = coreGradient;
-  }
+  ctx.fillStyle = `rgb(${red},${green},${blue})`;
   ctx.fill();
 
   if (zoomLevel !== "galaxy") {
     ctx.beginPath();
     ctx.arc(drawX, drawY, baseRadius, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(${red},${green},${blue},0.9)`;
-    ctx.lineWidth = 0.8;
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.arc(drawX, drawY, baseRadius + 1.2, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(${red},${green},${blue},0.2)`;
-    ctx.lineWidth = 0.5;
+    ctx.strokeStyle = `rgba(${rimRed},${rimGreen},${rimBlue},0.35)`;
+    ctx.lineWidth = 0.6;
     ctx.stroke();
   }
 
   if (node.source_type !== "public_abstract" && zoomLevel !== "galaxy") {
-    const size = baseRadius * 1.7;
-    ctx.strokeStyle = `rgba(${red},${green},${blue},0.7)`;
-    ctx.lineWidth = 0.8;
+    const size = baseRadius * 1.25;
+    ctx.strokeStyle = `rgba(${red},${green},${blue},0.52)`;
+    ctx.lineWidth = 0.7;
     ctx.strokeRect(drawX - (size / 2), drawY - (size / 2), size, size);
   }
 
@@ -726,14 +1266,24 @@ const MapCanvas = forwardRef(function MapCanvas({
   const wrapperRef = useRef(null);
   const canvasRef = useRef(null);
   const minimapRef = useRef(null);
-  const cameraRef = useRef({ x: 0, y: 0, zoom: 12, pitch: 0.8, yaw: 0.5 });
+  const cameraRef = useRef({
+    x: 0,
+    y: 0,
+    zoom: 1,
+    baseZoom: 1,
+    zoomScale: 1,
+    pitch: 0.8,
+    yaw: 0.5,
+  });
   const animationRef = useRef(null);
+  const edgeRenderResumeAtRef = useRef(0);
   const isDragging = useRef(false);
   const dragStart = useRef(null);
   const dragMoved = useRef(false);
   const lastClickRef = useRef({ time: 0, nodeId: null });
   const isLassoDrawing = useRef(false);
   const lassoPointsRef = useRef([]);
+  const clusterLabelRefs = useRef(new Map());
   const [hoveredNode, setHoveredNode] = useState(null);
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
@@ -772,47 +1322,14 @@ const MapCanvas = forwardRef(function MapCanvas({
     [renderableNodes],
   );
 
-  const clusterLabels = useMemo(
-    () => computeClusterLabels(renderableNodes),
+  const categoryClusters = useMemo(
+    () => computeCategoryClusters(renderableNodes),
     [renderableNodes],
   );
 
-  const nodesByCluster = useMemo(() => {
-    const xs = renderableNodes.map((node) => node.umap_x).filter(Number.isFinite);
-    const ys = renderableNodes.map((node) => node.umap_y).filter(Number.isFinite);
-    if (!xs.length || !ys.length) {
-      return {};
-    }
-
-    const xMin = Math.min(...xs);
-    const xMax = Math.max(...xs);
-    const yMin = Math.min(...ys);
-    const yMax = Math.max(...ys);
-    const cells = 10;
-    const groups = {};
-
-    renderableNodes.forEach((node) => {
-      const col = Math.min(
-        Math.floor(((node.umap_x - xMin) / ((xMax - xMin) + 0.001)) * cells),
-        cells - 1,
-      );
-      const row = Math.min(
-        Math.floor(((node.umap_y - yMin) / ((yMax - yMin) + 0.001)) * cells),
-        cells - 1,
-      );
-      const key = row * cells + col;
-      if (!groups[key]) {
-        groups[key] = [];
-      }
-      groups[key].push(node);
-    });
-
-    return groups;
-  }, [renderableNodes]);
-
-  const meshEdges = useMemo(
-    () => buildClusterMesh(renderableNodes, nodesByCluster),
-    [renderableNodes, nodesByCluster],
+  const clusterEdges = useMemo(
+    () => buildClusterConstellationEdges(categoryClusters, 3),
+    [categoryClusters],
   );
 
   const nodeMap = useMemo(
@@ -853,6 +1370,65 @@ const MapCanvas = forwardRef(function MapCanvas({
     }
   }, [hoveredNode, nodeMap, onHoverNode]);
 
+  const registerClusterLabelRef = useCallback((clusterId, element) => {
+    if (element) {
+      clusterLabelRefs.current.set(clusterId, element);
+      return;
+    }
+
+    clusterLabelRefs.current.delete(clusterId);
+  }, []);
+
+  const syncClusterLabelPositions = useCallback((projectedClusters) => {
+    const refs = clusterLabelRefs.current;
+    const visibleIds = new Set();
+
+    projectedClusters.forEach((cluster) => {
+      const element = refs.get(cluster.id);
+      if (!element) {
+        return;
+      }
+
+      visibleIds.add(cluster.id);
+
+      if (!cluster.label.visible) {
+        element.style.opacity = "0";
+        element.style.transform = "translate(-9999px, -9999px)";
+        return;
+      }
+
+      const pill = element.firstElementChild;
+      const text = pill?.firstElementChild;
+      if (pill) {
+        pill.style.padding = cluster.label.showPill ? "4px" : "0";
+        pill.style.borderRadius = cluster.label.showPill ? "4px" : "0";
+        pill.style.background = cluster.label.showPill ? "rgba(12,14,18,0.7)" : "transparent";
+      }
+      if (text) {
+        if (text.textContent !== cluster.label.text) {
+          text.textContent = cluster.label.text;
+        }
+        text.style.fontSize = `${cluster.label.fontSize}px`;
+      }
+
+      element.style.opacity = "1";
+      element.style.transform = `translate(${cluster.label.sx}px, ${cluster.label.sy}px) translate(-50%, -50%)`;
+    });
+
+    refs.forEach((element, clusterId) => {
+      if (visibleIds.has(clusterId)) {
+        return;
+      }
+
+      element.style.opacity = "0";
+      element.style.transform = "translate(-9999px, -9999px)";
+    });
+  }, []);
+
+  const suspendClusterEdgeRendering = useCallback((delayMs = 150) => {
+    edgeRenderResumeAtRef.current = performance.now() + delayMs;
+  }, []);
+
   const worldToScreen = useCallback((wx, wy, canvas) => {
     const camera = cameraRef.current;
     return {
@@ -888,9 +1464,44 @@ const MapCanvas = forwardRef(function MapCanvas({
     };
   }, []);
 
+  const getScreenRelativeWorld = useCallback((sx, sy, canvas, cameraOverride = cameraRef.current) => {
+    if (viewMode !== "3D") {
+      return {
+        dx: (sx - (canvas.width / 2)) / cameraOverride.zoom,
+        dy: (sy - (canvas.height / 2)) / cameraOverride.zoom,
+      };
+    }
+
+    const x = sx - (canvas.width / 2);
+    const y = sy - (canvas.height / 2);
+    const cosPitch = Math.cos(cameraOverride.pitch);
+    const sinPitch = Math.sin(cameraOverride.pitch);
+    const fov = 800;
+    const denominator = (cosPitch * cameraOverride.zoom * fov) - (y * 10 * sinPitch);
+    const ry = Math.abs(denominator) < 0.0001
+      ? 0
+      : (y * fov) / denominator;
+    const scale = fov / (fov + (ry * sinPitch * 10));
+    const rx = x / ((cameraOverride.zoom * scale) || 1);
+    const cosYaw = Math.cos(cameraOverride.yaw);
+    const sinYaw = Math.sin(cameraOverride.yaw);
+
+    return {
+      dx: (rx * cosYaw) + (ry * sinYaw),
+      dy: (-rx * sinYaw) + (ry * cosYaw),
+    };
+  }, [viewMode]);
+
   const projectNode = useCallback((node, canvas) => {
     if (viewMode === "3D") {
-      return project3D(node.umap_x, node.umap_y, (node.friction_score ?? 0) * 40, canvas);
+      const ground = project3D(node.umap_x, node.umap_y, 0, canvas);
+      const elevated = project3D(node.umap_x, node.umap_y, (node.friction_score ?? 0) * 40, canvas);
+      return {
+        ...elevated,
+        groundSx: ground.sx,
+        groundSy: ground.sy,
+        groundScale: ground.scale,
+      };
     }
 
     const { sx, sy } = worldToScreen(node.umap_x, node.umap_y, canvas);
@@ -904,11 +1515,12 @@ const MapCanvas = forwardRef(function MapCanvas({
 
   const screenToWorld = useCallback((sx, sy, canvas) => {
     const camera = cameraRef.current;
+    const { dx, dy } = getScreenRelativeWorld(sx, sy, canvas, camera);
     return {
-      wx: ((sx - (canvas.width / 2)) / camera.zoom) - camera.x,
-      wy: ((sy - (canvas.height / 2)) / camera.zoom) - camera.y,
+      wx: dx - camera.x,
+      wy: dy - camera.y,
     };
-  }, []);
+  }, [getScreenRelativeWorld]);
 
   const syncCanvasSize = useCallback(() => {
     const canvas = canvasRef.current;
@@ -944,14 +1556,20 @@ const MapCanvas = forwardRef(function MapCanvas({
     return () => observer.disconnect();
   }, [syncCanvasSize]);
 
-  useEffect(() => {
-    if (!nodes.length) {
+  const fitToView = useCallback((paddingPx = 60) => {
+    if (!renderableNodes.length) {
       return;
     }
 
-    const xs = nodes.map((node) => node.umap_x).filter((value) => value != null);
-    const ys = nodes.map((node) => node.umap_y).filter((value) => value != null);
-    if (!xs.length) {
+    syncCanvasSize();
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    const xs = renderableNodes.map((node) => node.umap_x).filter(Number.isFinite);
+    const ys = renderableNodes.map((node) => node.umap_y).filter(Number.isFinite);
+    if (!xs.length || !ys.length) {
       return;
     }
 
@@ -959,29 +1577,45 @@ const MapCanvas = forwardRef(function MapCanvas({
     const xMax = Math.max(...xs);
     const yMin = Math.min(...ys);
     const yMax = Math.max(...ys);
-    const worldW = xMax - xMin + 4;
-    const worldH = yMax - yMin + 4;
-
-    const canvas = canvasRef.current;
-    if (!canvas) {
-      return;
-    }
-
-    const canvasW = canvas.offsetWidth || 800;
-    const canvasH = canvas.offsetHeight || 600;
-    const fitZoom = Math.min(canvasW / worldW, canvasH / worldH) * 0.82;
-    const clampedZoom = Math.max(4, Math.min(fitZoom, 16));
+    const worldW = Math.max(1, xMax - xMin);
+    const worldH = Math.max(1, yMax - yMin);
+    const availableWidth = Math.max(1, canvas.width - (paddingPx * 2));
+    const availableHeight = Math.max(1, canvas.height - (paddingPx * 2));
+    const fitZoom = Math.min(availableWidth / worldW, availableHeight / worldH);
     const centerX = (xMin + xMax) / 2;
     const centerY = (yMin + yMax) / 2;
 
     cameraRef.current = {
       x: -centerX,
       y: -centerY,
-      zoom: clampedZoom,
+      zoom: fitZoom,
+      baseZoom: fitZoom,
+      zoomScale: 1,
       pitch: cameraRef.current.pitch ?? 0.8,
       yaw: cameraRef.current.yaw ?? 0.5,
     };
-  }, [nodes]);
+    suspendClusterEdgeRendering();
+  }, [renderableNodes, suspendClusterEdgeRendering, syncCanvasSize]);
+
+  useEffect(() => {
+    fitToView(60);
+  }, [fitToView]);
+
+  const applyZoomAtPoint = useCallback((nextZoomScale, point, canvas) => {
+    const camera = cameraRef.current;
+    const clampedZoomScale = clamp(nextZoomScale, 0.4, 4);
+    const { dx: beforeDx, dy: beforeDy } = getScreenRelativeWorld(point.x, point.y, canvas, camera);
+    const worldX = beforeDx - camera.x;
+    const worldY = beforeDy - camera.y;
+
+    camera.zoomScale = clampedZoomScale;
+    camera.zoom = camera.baseZoom * camera.zoomScale;
+
+    const { dx: afterDx, dy: afterDy } = getScreenRelativeWorld(point.x, point.y, canvas, camera);
+    camera.x = afterDx - worldX;
+    camera.y = afterDy - worldY;
+    suspendClusterEdgeRendering();
+  }, [getScreenRelativeWorld, suspendClusterEdgeRendering]);
 
   const clientToCanvasPoint = useCallback((clientX, clientY) => {
     const canvas = canvasRef.current;
@@ -1040,23 +1674,17 @@ const MapCanvas = forwardRef(function MapCanvas({
     minimapCtx.lineWidth = 1;
     minimapCtx.strokeRect(0, 0, 160, 120);
  
-    const wxMin = worldBounds.xMin - 2;
-    const wxMax = worldBounds.xMax + 2;
-    const wyMin = worldBounds.yMin - 2;
-    const wyMax = worldBounds.yMax + 2;
+    const wxMin = worldBounds.xMin - MAP_WORLD_PADDING;
+    const wxMax = worldBounds.xMax + MAP_WORLD_PADDING;
+    const wyMin = worldBounds.yMin - MAP_WORLD_PADDING;
+    const wyMax = worldBounds.yMax + MAP_WORLD_PADDING;
     const scaleX = 148 / Math.max(1, wxMax - wxMin);
     const scaleY = 108 / Math.max(1, wyMax - wyMin);
 
     renderableNodes.forEach((node) => {
       const mx = 6 + ((node.umap_x - wxMin) * scaleX);
       const my = 6 + ((node.umap_y - wyMin) * scaleY);
-      const [red, green, blue] = (node.friction_score ?? 0) >= 0.6
-        ? [255, 100, 50]
-        : (node.friction_score ?? 0) >= 0.3
-          ? [200, 220, 0]
-          : node.polarity === "inhibits"
-            ? [130, 80, 255]
-            : [0, 180, 120];
+      const [red, green, blue] = getNodeColor(node);
 
       minimapCtx.beginPath();
       minimapCtx.arc(mx, my, 1.5, 0, Math.PI * 2);
@@ -1111,21 +1739,30 @@ const MapCanvas = forwardRef(function MapCanvas({
     const width = canvas.width;
     const height = canvas.height;
     const zoom = cameraRef.current.zoom;
+    const zoomScale = cameraRef.current.zoomScale ?? 1;
     const zoomLevel = getZoomLevel(zoom);
+    const projectedCategoryClusters = categoryClusters
+      .map((cluster) => projectCategoryClusterOverlay(
+        cluster,
+        canvas,
+        viewMode,
+        zoom,
+        worldToScreen,
+        project3D,
+      ))
+      .filter(Boolean);
+    const laidOutCategoryClusters = layoutClusterLabels(projectedCategoryClusters, ctx, canvas, zoomScale);
+    const shouldRenderClusterEdges = !isDragging.current && performance.now() >= edgeRenderResumeAtRef.current;
 
     ctx.fillStyle = "#050608";
     ctx.fillRect(0, 0, width, height);
 
-    if (zoomLevel !== "galaxy") {
-      drawGrid(ctx, cameraRef.current, width, height);
-    }
+    drawCategoryClusterOverlays(ctx, laidOutCategoryClusters, zoomLevel, viewMode);
+    drawClusterLabelConnectors(ctx, laidOutCategoryClusters);
+    syncClusterLabelPositions(laidOutCategoryClusters);
 
-    if (viewMode !== "3D" && (zoomLevel === "galaxy" || zoomLevel === "cluster")) {
-      drawClusterOutlines(ctx, clusterLabels, nodesByCluster, worldToScreen, canvas, zoom);
-    }
-
-    if (viewMode !== "3D" && (zoomLevel === "cluster" || zoomLevel === "node")) {
-      drawMesh(ctx, meshEdges, worldToScreen, canvas, zoom);
+    if (zoomLevel !== "galaxy" && shouldRenderClusterEdges) {
+      drawConstellationEdges(ctx, clusterEdges, projectNode, canvas);
     }
 
     if (viewMode !== "3D") {
@@ -1193,20 +1830,20 @@ const MapCanvas = forwardRef(function MapCanvas({
     drawMarkers(ctx, markers, projectMarker, canvas);
     drawMinimap();
   }, [
-    clusterLabels,
+    categoryClusters,
     drawMinimap,
     hoveredNode,
     lassoPoints,
     markers,
-    meshEdges,
+    clusterEdges,
     nodeMap,
-    nodesByCluster,
     project3D,
     projectNode,
     renderableNodes,
     scoutHighlightColor,
     scoutHighlightIdSet,
     selectedIdSet,
+    syncClusterLabelPositions,
     syncCanvasSize,
     tool,
     viewMode,
@@ -1256,6 +1893,7 @@ const MapCanvas = forwardRef(function MapCanvas({
         camera.x += deltaX / camera.zoom;
         camera.y += deltaY / camera.zoom;
       }
+      suspendClusterEdgeRendering();
       dragStart.current = { x: event.clientX, y: event.clientY };
       return;
     }
@@ -1267,7 +1905,7 @@ const MapCanvas = forwardRef(function MapCanvas({
     if (hit) {
       setTooltipPos({ x: event.clientX + 14, y: event.clientY - 10 });
     }
-  }, [clientToCanvasPoint, onHoverNode, pickNode, tool, viewMode]);
+  }, [clientToCanvasPoint, onHoverNode, pickNode, suspendClusterEdgeRendering, tool, viewMode]);
 
   const handlePointerDown = useCallback((event) => {
     if (event.button !== 0) {
@@ -1301,8 +1939,9 @@ const MapCanvas = forwardRef(function MapCanvas({
     dragMoved.current = false;
     dragStart.current = { x: event.clientX, y: event.clientY };
     setIsDraggingVisual(true);
+    suspendClusterEdgeRendering();
     event.currentTarget.setPointerCapture?.(event.pointerId);
-  }, [clientToCanvasPoint, onHoverNode, tool]);
+  }, [clientToCanvasPoint, onHoverNode, suspendClusterEdgeRendering, tool]);
 
   const handlePointerUp = useCallback((event) => {
     if (tool === "lasso" && isLassoDrawing.current) {
@@ -1352,6 +1991,7 @@ const MapCanvas = forwardRef(function MapCanvas({
     dragMoved.current = false;
     dragStart.current = null;
     setIsDraggingVisual(false);
+    suspendClusterEdgeRendering();
     event.currentTarget.releasePointerCapture?.(event.pointerId);
 
     if (!moved && hit) {
@@ -1375,6 +2015,7 @@ const MapCanvas = forwardRef(function MapCanvas({
     projectNode,
     renderableNodes,
     screenToWorld,
+    suspendClusterEdgeRendering,
     tool,
   ]);
 
@@ -1393,7 +2034,8 @@ const MapCanvas = forwardRef(function MapCanvas({
     lassoPointsRef.current = [];
     setLassoPoints([]);
     setIsDraggingVisual(false);
-  }, []);
+    suspendClusterEdgeRendering();
+  }, [suspendClusterEdgeRendering]);
 
   const handleWheel = useCallback((event) => {
     event.preventDefault();
@@ -1405,18 +2047,15 @@ const MapCanvas = forwardRef(function MapCanvas({
     }
 
     const camera = cameraRef.current;
-    const nextZoom = clamp(camera.zoom * (event.deltaY < 0 ? 1.12 : 0.9), 4, 110);
+    const delta = event.deltaMode === 1
+      ? event.deltaY * 16
+      : event.deltaMode === 2
+        ? event.deltaY * canvas.height
+        : event.deltaY;
+    const zoomFactor = Math.exp(-delta * (event.ctrlKey ? 0.0022 : 0.0014));
 
-    if (viewMode === "3D") {
-      camera.zoom = nextZoom;
-      return;
-    }
-
-    const { wx, wy } = screenToWorld(point.x, point.y, canvas);
-    camera.zoom = nextZoom;
-    camera.x = ((point.x - (canvas.width / 2)) / nextZoom) - wx;
-    camera.y = ((point.y - (canvas.height / 2)) / nextZoom) - wy;
-  }, [clientToCanvasPoint, screenToWorld, viewMode]);
+    applyZoomAtPoint((camera.zoomScale ?? 1) * zoomFactor, point, canvas);
+  }, [applyZoomAtPoint, clientToCanvasPoint]);
 
   const handleMinimapClick = useCallback((event) => {
     if (!worldBounds) {
@@ -1426,10 +2065,10 @@ const MapCanvas = forwardRef(function MapCanvas({
     const rect = event.currentTarget.getBoundingClientRect();
     const x = clamp(event.clientX - rect.left, 6, 154);
     const y = clamp(event.clientY - rect.top, 6, 114);
-    const wxMin = worldBounds.xMin - 2;
-    const wxMax = worldBounds.xMax + 2;
-    const wyMin = worldBounds.yMin - 2;
-    const wyMax = worldBounds.yMax + 2;
+    const wxMin = worldBounds.xMin - MAP_WORLD_PADDING;
+    const wxMax = worldBounds.xMax + MAP_WORLD_PADDING;
+    const wyMin = worldBounds.yMin - MAP_WORLD_PADDING;
+    const wyMax = worldBounds.yMax + MAP_WORLD_PADDING;
     const wx = wxMin + (((x - 6) / 148) * (wxMax - wxMin));
     const wy = wyMin + (((y - 6) / 108) * (wyMax - wyMin));
 
@@ -1438,7 +2077,25 @@ const MapCanvas = forwardRef(function MapCanvas({
       x: -wx,
       y: -wy,
     };
-  }, [worldBounds]);
+    suspendClusterEdgeRendering();
+  }, [suspendClusterEdgeRendering, worldBounds]);
+
+  const handleZoomControl = useCallback((factor) => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    applyZoomAtPoint(
+      (cameraRef.current.zoomScale ?? 1) * factor,
+      { x: canvas.width / 2, y: canvas.height / 2 },
+      canvas,
+    );
+  }, [applyZoomAtPoint]);
+
+  const handleZoomHome = useCallback(() => {
+    fitToView(60);
+  }, [fitToView]);
 
   const cursor = isDraggingVisual
     ? "grabbing"
@@ -1476,6 +2133,58 @@ const MapCanvas = forwardRef(function MapCanvas({
         onPointerCancel={handlePointerCancel}
         onWheel={handleWheel}
       />
+
+      <div
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          inset: 0,
+          zIndex: 18,
+          pointerEvents: "none",
+        }}
+      >
+        {categoryClusters.map((cluster) => {
+          const clusterStyle = getCategoryClusterStyle(cluster.categoryKey);
+
+          return (
+            <div
+              key={cluster.id}
+              ref={(element) => registerClusterLabelRef(cluster.id, element)}
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                transform: "translate(-9999px, -9999px)",
+                transformOrigin: "center center",
+                opacity: 0,
+                transition: isDraggingVisual ? "none" : "opacity 120ms ease-out",
+                willChange: "transform, opacity",
+              }}
+            >
+              <div
+                style={{
+                  padding: 4,
+                  borderRadius: 4,
+                  background: clusterStyle.labelBg,
+                }}
+              >
+                <span
+                  style={{
+                    color: clusterStyle.labelText,
+                    fontFamily: "'Syne', sans-serif",
+                    fontSize: 11,
+                    fontWeight: 500,
+                    lineHeight: 1,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {truncateText(cluster.label, 34)}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
 
       <div
         style={{
@@ -1566,6 +2275,49 @@ const MapCanvas = forwardRef(function MapCanvas({
           borderRadius: 12,
         }}
       />
+
+      <div
+        style={{
+          position: "absolute",
+          right: 14,
+          bottom: 14,
+          zIndex: 30,
+          display: "flex",
+          flexDirection: "column",
+          gap: 6,
+        }}
+      >
+        {[
+          { label: "+", title: "Zoom In", onClick: () => handleZoomControl(1.2) },
+          { label: "−", title: "Zoom Out", onClick: () => handleZoomControl(1 / 1.2) },
+          { label: "⌂", title: "Fit View", onClick: handleZoomHome },
+        ].map((control) => (
+          <button
+            key={control.title}
+            type="button"
+            title={control.title}
+            onClick={control.onClick}
+            style={{
+              width: 28,
+              height: 28,
+              padding: 0,
+              background: "#0c0e12",
+              border: "1px solid #1e2430",
+              color: "#00e5a0",
+              borderRadius: 8,
+              fontFamily: "'DM Mono', monospace",
+              fontSize: 14,
+              lineHeight: 1,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            {control.label}
+          </button>
+        ))}
+      </div>
 
       <div
         style={{

@@ -32,7 +32,7 @@ def reduce_umap(nodes: list[ClaimNode], vectors_dict: dict[str, np.ndarray]) -> 
     try:
         reducer = umap.UMAP(
             n_neighbors=min(15, len(nodes) - 1),
-            min_dist=0.1,
+            min_dist=0.25,
             n_components=2,
             metric="cosine",
             random_state=42,
