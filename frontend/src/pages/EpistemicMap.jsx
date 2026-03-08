@@ -27,6 +27,8 @@ export default function EpistemicMap() {
   const [showCriticalOnly, setShowCriticalOnly] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [viewMode, setViewMode] = useState("2D");
+  const [leftWidth, setLeftWidth] = useState(160);
+  const [rightWidth, setRightWidth] = useState(280);
   const [scoutHighlightIds, setScoutHighlightIds] = useState([]);
   const [scoutHighlightColor, setScoutHighlightColor] = useState("#ffff00");
   const mapCanvasRef = useRef(null);
@@ -326,7 +328,9 @@ export default function EpistemicMap() {
     >
       <aside
         style={{
-          width: isStackedLayout ? "100%" : 220,
+          width: isStackedLayout ? "100%" : leftWidth,
+          minWidth: isStackedLayout ? "100%" : 120,
+          maxWidth: isStackedLayout ? "100%" : 280,
           flexShrink: 0,
           background: "#0c0e12",
           borderRight: isStackedLayout ? "none" : "1px solid #1e2430",
@@ -334,6 +338,7 @@ export default function EpistemicMap() {
           display: "flex",
           flexDirection: "column",
           overflowY: "auto",
+          position: "relative",
         }}
       >
         <div
@@ -593,6 +598,42 @@ export default function EpistemicMap() {
             {"<-"} New analysis
           </button>
         </div>
+
+        {!isStackedLayout ? (
+          <div
+            onMouseDown={(event) => {
+              event.preventDefault();
+              const startX = event.clientX;
+              const startW = leftWidth;
+              const onMove = (moveEvent) => {
+                const newW = Math.min(280, Math.max(120, startW + moveEvent.clientX - startX));
+                setLeftWidth(newW);
+              };
+              const onUp = () => {
+                window.removeEventListener("mousemove", onMove);
+                window.removeEventListener("mouseup", onUp);
+              };
+              window.addEventListener("mousemove", onMove);
+              window.addEventListener("mouseup", onUp);
+            }}
+            onMouseEnter={(event) => {
+              event.currentTarget.style.background = "rgba(0,229,160,0.3)";
+            }}
+            onMouseLeave={(event) => {
+              event.currentTarget.style.background = "transparent";
+            }}
+            style={{
+              position: "absolute",
+              right: -3,
+              top: 0,
+              bottom: 0,
+              width: 6,
+              cursor: "ew-resize",
+              zIndex: 10,
+              background: "transparent",
+            }}
+          />
+        ) : null}
       </aside>
 
       <div
@@ -802,7 +843,9 @@ export default function EpistemicMap() {
 
       <div
         style={{
-          width: isStackedLayout ? "100%" : 380,
+          width: isStackedLayout ? "100%" : rightWidth,
+          minWidth: isStackedLayout ? "100%" : 220,
+          maxWidth: isStackedLayout ? "100%" : 480,
           minHeight: isStackedLayout ? 540 : "100%",
           flexShrink: 0,
           background: "#0c0e12",
@@ -811,8 +854,45 @@ export default function EpistemicMap() {
           display: "flex",
           flexDirection: "column",
           overflow: "hidden",
+          position: "relative",
         }}
       >
+        {!isStackedLayout ? (
+          <div
+            onMouseDown={(event) => {
+              event.preventDefault();
+              const startX = event.clientX;
+              const startW = rightWidth;
+              const onMove = (moveEvent) => {
+                const newW = Math.min(480, Math.max(220, startW - moveEvent.clientX + startX));
+                setRightWidth(newW);
+              };
+              const onUp = () => {
+                window.removeEventListener("mousemove", onMove);
+                window.removeEventListener("mouseup", onUp);
+              };
+              window.addEventListener("mousemove", onMove);
+              window.addEventListener("mouseup", onUp);
+            }}
+            onMouseEnter={(event) => {
+              event.currentTarget.style.background = "rgba(0,229,160,0.3)";
+            }}
+            onMouseLeave={(event) => {
+              event.currentTarget.style.background = "transparent";
+            }}
+            style={{
+              position: "absolute",
+              left: -3,
+              top: 0,
+              bottom: 0,
+              width: 6,
+              cursor: "ew-resize",
+              zIndex: 10,
+              background: "transparent",
+            }}
+          />
+        ) : null}
+
         <div style={{ display: "flex", borderBottom: "1px solid #1e2430", flexShrink: 0 }}>
           {[
             { id: "inspector", icon: "I", label: "Inspector" },

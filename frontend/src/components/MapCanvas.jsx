@@ -1281,6 +1281,7 @@ const MapCanvas = forwardRef(function MapCanvas({
   const dragStart = useRef(null);
   const dragMoved = useRef(false);
   const lastClickRef = useRef({ time: 0, nodeId: null });
+  const lastPinchDistRef = useRef(null);
   const isLassoDrawing = useRef(false);
   const lassoPointsRef = useRef([]);
   const clusterLabelRefs = useRef(new Map());
@@ -2055,6 +2056,64 @@ const MapCanvas = forwardRef(function MapCanvas({
     const zoomFactor = Math.exp(-delta * (event.ctrlKey ? 0.0022 : 0.0014));
 
     applyZoomAtPoint((camera.zoomScale ?? 1) * zoomFactor, point, canvas);
+  }, [applyZoomAtPoint, clientToCanvasPoint]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return undefined;
+    }
+
+    const handleTouchStart = (event) => {
+      if (event.touches.length === 2) {
+        const dx = event.touches[0].clientX - event.touches[1].clientX;
+        const dy = event.touches[0].clientY - event.touches[1].clientY;
+        lastPinchDistRef.current = Math.sqrt(dx * dx + dy * dy);
+      }
+    };
+
+    const handleTouchMove = (event) => {
+      if (event.touches.length !== 2) {
+        return;
+      }
+
+      event.preventDefault();
+
+      const dx = event.touches[0].clientX - event.touches[1].clientX;
+      const dy = event.touches[0].clientY - event.touches[1].clientY;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const pointA = clientToCanvasPoint(event.touches[0].clientX, event.touches[0].clientY);
+      const pointB = clientToCanvasPoint(event.touches[1].clientX, event.touches[1].clientY);
+
+      if (lastPinchDistRef.current && pointA && pointB) {
+        const delta = dist - lastPinchDistRef.current;
+        const zoomFactor = 1 + (delta * 0.01);
+        const centerPoint = {
+          x: (pointA.x + pointB.x) / 2,
+          y: (pointA.y + pointB.y) / 2,
+        };
+
+        applyZoomAtPoint((cameraRef.current.zoomScale ?? 1) * zoomFactor, centerPoint, canvas);
+      }
+
+      lastPinchDistRef.current = dist;
+    };
+
+    const resetPinch = () => {
+      lastPinchDistRef.current = null;
+    };
+
+    canvas.addEventListener("touchstart", handleTouchStart, { passive: true });
+    canvas.addEventListener("touchmove", handleTouchMove, { passive: false });
+    canvas.addEventListener("touchend", resetPinch, { passive: true });
+    canvas.addEventListener("touchcancel", resetPinch, { passive: true });
+
+    return () => {
+      canvas.removeEventListener("touchstart", handleTouchStart);
+      canvas.removeEventListener("touchmove", handleTouchMove);
+      canvas.removeEventListener("touchend", resetPinch);
+      canvas.removeEventListener("touchcancel", resetPinch);
+    };
   }, [applyZoomAtPoint, clientToCanvasPoint]);
 
   const handleMinimapClick = useCallback((event) => {
