@@ -1,10 +1,20 @@
 import { useCallback, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { analyzeSchema, pollStatus, startIngest } from "../api/client";
+import {
+  analyzeSchema,
+  ingestPdfs,
+  ingestUrls,
+  ingestXlsx,
+  ingestYoutube,
+  pollStatus,
+  searchSemanticScholar,
+  startIngest,
+} from "../api/client";
 import SchemaPreview from "../components/SchemaPreview";
 
 const DEMO_SESSION_ID = "55500fc5f1654234b44f5d61182cf924";
+const MAX_SOURCE_ITEMS = 25;
 
 function parseCsvPreview(text, rowLimit = 10) {
   const rows = [];
@@ -16,9 +26,9 @@ function parseCsvPreview(text, rowLimit = 10) {
     const char = text[index];
     const nextChar = text[index + 1];
 
-    if (char === '"') {
-      if (inQuotes && nextChar === '"') {
-        currentField += '"';
+    if (char === "\"") {
+      if (inQuotes && nextChar === "\"") {
+        currentField += "\"";
         index += 1;
       } else {
         inQuotes = !inQuotes;
@@ -79,12 +89,52 @@ function getErrorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function parseLineEntries(text) {
+  const seen = new Set();
+  return text
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter((value) => {
+      if (!value || seen.has(value)) {
+        return false;
+      }
+      seen.add(value);
+      return true;
+    });
+}
+
+function createSessionId() {
+  return globalThis.crypto?.randomUUID?.().replace(/-/g, "")
+    ?? `${Date.now()}${Math.random().toString(16).slice(2)}`;
+}
+
+function validateFiles(fileList, allowedExtensions, label) {
+  const files = Array.from(fileList ?? []);
+  if (!files.length) {
+    return { files: [], error: null };
+  }
+  if (files.length > MAX_SOURCE_ITEMS) {
+    return { files: [], error: `${label} is limited to ${MAX_SOURCE_ITEMS} files.` };
+  }
+  if (files.some((file) => !allowedExtensions.some((extension) => file.name.toLowerCase().endsWith(extension)))) {
+    return { files: [], error: `Only ${label.toLowerCase()} are supported.` };
+  }
+  return { files, error: null };
+}
+
 export default function UploadLanding() {
   const navigate = useNavigate();
   const csvInputRef = useRef(null);
-  const [csvFile, setCsvFile] = useState(null);
+  const pdfInputRef = useRef(null);
+  const xlsxInputRef = useRef(null);
+
+  const [csvFiles, setCsvFiles] = useState([]);
+  const [pdfFiles, setPdfFiles] = useState([]);
+  const [xlsxFiles, setXlsxFiles] = useState([]);
   const [csvDragOver, setCsvDragOver] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [urlText, setUrlText] = useState("");
+  const [youtubeText, setYoutubeText] = useState("");
   const [paperCount, setPaperCount] = useState(100);
   const [semanticFocus, setSemanticFocus] = useState("mechanism_of_action");
   const [schemaData, setSchemaData] = useState(null);
@@ -94,30 +144,24 @@ export default function UploadLanding() {
   const [statusText, setStatusText] = useState("");
   const [error, setError] = useState(null);
 
-  const handleCsvFile = useCallback(async (file) => {
-    if (!file) {
+  const analyzeFirstCsv = useCallback(async (files) => {
+    const firstFile = files[0];
+    if (!firstFile) {
+      setSchemaData(null);
       return;
     }
 
-    if (!file.name.toLowerCase().endsWith(".csv")) {
-      setError("Only CSV files are supported.");
-      return;
-    }
-
-    setError(null);
-    setCsvFile(file);
     setIsAnalyzing(true);
     setSchemaData(null);
-
     try {
-      const text = await file.text();
+      const text = await firstFile.text();
       const { headers, sampleRows } = parseCsvPreview(text);
 
       if (!headers.length) {
         throw new Error("The selected file does not contain readable CSV headers.");
       }
 
-      const result = await analyzeSchema(headers, sampleRows, file.name);
+      const result = await analyzeSchema(headers, sampleRows, firstFile.name);
       setSchemaData(result);
     } catch (analysisError) {
       setError(`Schema analysis failed: ${getErrorMessage(analysisError)}`);
@@ -126,51 +170,165 @@ export default function UploadLanding() {
     }
   }, []);
 
-  const handleDrop = useCallback((event) => {
-    event.preventDefault();
-    setCsvDragOver(false);
-    void handleCsvFile(event.dataTransfer.files?.[0]);
-  }, [handleCsvFile]);
-
-  const handleRun = useCallback(async () => {
-    if (!csvFile && searchQuery.trim().length < 3) {
-      setError("Provide a CSV file or a search query.");
+  const handleCsvFiles = useCallback(async (fileList) => {
+    const { files, error: validationError } = validateFiles(fileList, [".csv"], "CSV upload");
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    if (!files.length) {
       return;
     }
 
     setError(null);
+    setCsvFiles(files);
+    await analyzeFirstCsv(files);
+  }, [analyzeFirstCsv]);
+
+  const handlePdfChange = useCallback((event) => {
+    const { files, error: validationError } = validateFiles(event.target.files, [".pdf"], "PDF upload");
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    setError(null);
+    setPdfFiles(files);
+    event.target.value = "";
+  }, []);
+
+  const handleXlsxChange = useCallback((event) => {
+    const { files, error: validationError } = validateFiles(event.target.files, [".xlsx", ".xls"], "Excel upload");
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    setError(null);
+    setXlsxFiles(files);
+    event.target.value = "";
+  }, []);
+
+  const handleDrop = useCallback((event) => {
+    event.preventDefault();
+    setCsvDragOver(false);
+    void handleCsvFiles(event.dataTransfer.files);
+  }, [handleCsvFiles]);
+
+  const handleRun = useCallback(async () => {
+    const trimmedQuery = searchQuery.trim();
+    const urls = parseLineEntries(urlText);
+    const youtubeUrls = parseLineEntries(youtubeText);
+    const hasSemanticSearch = trimmedQuery.length >= 3;
+    const totalSourceCalls = (
+      csvFiles.length
+      + (pdfFiles.length ? 1 : 0)
+      + (urls.length ? 1 : 0)
+      + (youtubeUrls.length ? 1 : 0)
+      + (xlsxFiles.length ? 1 : 0)
+      + (hasSemanticSearch ? 1 : 0)
+    );
+
+    if (!totalSourceCalls) {
+      setError("Provide at least one source: CSV, PDF, URLs, YouTube, Excel, or a Semantic Scholar query.");
+      return;
+    }
+    if (trimmedQuery && !hasSemanticSearch) {
+      setError("Semantic Scholar query must be at least 3 characters.");
+      return;
+    }
+    if (urls.length > MAX_SOURCE_ITEMS) {
+      setError(`Web URL ingestion is limited to ${MAX_SOURCE_ITEMS} links.`);
+      return;
+    }
+    if (youtubeUrls.length > MAX_SOURCE_ITEMS) {
+      setError(`YouTube ingestion is limited to ${MAX_SOURCE_ITEMS} videos.`);
+      return;
+    }
+
+    const sessionId = createSessionId();
+    let completedSources = 0;
+    let latestBackendProgress = 5;
+
+    const updateCombinedProgress = () => {
+      const sourceShare = totalSourceCalls ? (completedSources / totalSourceCalls) * 45 : 45;
+      const pipelineShare = (latestBackendProgress / 100) * 55;
+      setProgress(Math.max(5, Math.min(99, Math.round(sourceShare + pipelineShare))));
+    };
+
+    setError(null);
     setIsRunning(true);
     setProgress(5);
-    setStatusText("Starting ingestion pipeline...");
+    setStatusText("Preparing multi-source ingestion...");
 
     try {
-      const formData = new FormData();
-      if (csvFile) {
-        formData.append("csv", csvFile);
-      }
-      formData.append("search_query", searchQuery.trim());
-      formData.append("paper_count", String(paperCount));
-      formData.append("semantic_focus", semanticFocus);
-
-      const { session_id: sessionId } = await startIngest(formData);
-      setStatusText("Fetching papers and extracting claims...");
-
       const statusLabels = {
+        created: "Creating session...",
         queued: "Queued for ingestion...",
-        ingesting: "Fetching papers and extracting claims...",
+        ingesting: "Extracting claims across sources...",
         embedding: "Embedding with polarity shift...",
         debating: "Running Actor/Critic debate pipeline...",
         finalizing: "Finalizing contradictions and layout...",
         ready: "Complete. Loading map...",
       };
 
-      await pollStatus(sessionId, (data) => {
-        setProgress(Math.max(5, data.progress ?? 0));
+      const pollPromise = pollStatus(sessionId, (data) => {
+        latestBackendProgress = Math.max(latestBackendProgress, data.progress ?? 0);
+        updateCombinedProgress();
         setStatusText(statusLabels[data.status] ?? data.status ?? "Working...");
         if (data.status === "error") {
           throw new Error(data.error_message ?? "Pipeline failed.");
         }
-      });
+      }, 1500);
+
+      const runSource = async (taskFactory) => {
+        const result = await taskFactory();
+        completedSources += 1;
+        updateCombinedProgress();
+        return result;
+      };
+
+      const sourceTasks = [
+        ...csvFiles.map((file) => runSource(async () => {
+          const formData = new FormData();
+          formData.append("session_id", sessionId);
+          formData.append("semantic_focus", semanticFocus);
+          formData.append("csv", file);
+          return startIngest(formData);
+        })),
+      ];
+
+      if (pdfFiles.length) {
+        sourceTasks.push(runSource(() => ingestPdfs(sessionId, pdfFiles, semanticFocus)));
+      }
+      if (urls.length) {
+        sourceTasks.push(runSource(() => ingestUrls(sessionId, urls, semanticFocus)));
+      }
+      if (youtubeUrls.length) {
+        sourceTasks.push(runSource(() => ingestYoutube(sessionId, youtubeUrls, semanticFocus)));
+      }
+      if (xlsxFiles.length) {
+        sourceTasks.push(runSource(() => ingestXlsx(sessionId, xlsxFiles, semanticFocus)));
+      }
+      if (hasSemanticSearch) {
+        sourceTasks.push(runSource(() => searchSemanticScholar(
+          sessionId,
+          trimmedQuery,
+          paperCount,
+          semanticFocus,
+        )));
+      }
+
+      const [results] = await Promise.all([
+        Promise.all(sourceTasks),
+        pollPromise,
+      ]);
+
+      const totalAdded = results.reduce(
+        (sum, result) => sum + Number(result?.nodes_added ?? 0),
+        0,
+      );
+      if (totalAdded === 0) {
+        throw new Error("No claim nodes were extracted from the selected sources.");
+      }
 
       setProgress(100);
       setStatusText("Ready.");
@@ -181,9 +339,26 @@ export default function UploadLanding() {
       setProgress(0);
       setStatusText("");
     }
-  }, [csvFile, navigate, paperCount, searchQuery, semanticFocus]);
+  }, [
+    csvFiles,
+    navigate,
+    paperCount,
+    pdfFiles,
+    searchQuery,
+    semanticFocus,
+    urlText,
+    xlsxFiles,
+    youtubeText,
+  ]);
 
-  const canRun = Boolean(csvFile || searchQuery.trim().length >= 3) && !isRunning;
+  const canRun = !isRunning && (
+    csvFiles.length > 0
+    || pdfFiles.length > 0
+    || xlsxFiles.length > 0
+    || Boolean(urlText.trim())
+    || Boolean(youtubeText.trim())
+    || searchQuery.trim().length >= 3
+  );
 
   return (
     <div style={styles.page}>
@@ -228,8 +403,8 @@ export default function UploadLanding() {
           <div style={styles.panelBadge("#4d7cff")}>PRIVATE / CSV</div>
           <div style={styles.panelTitle}>Lab Data</div>
           <div style={styles.panelDesc}>
-            Upload your proprietary assay results. The Schema Agent auto-maps
-            columns to biological roles.
+            Upload proprietary assay results and screening tables. Schema analysis runs on the
+            first file, and CSV ingestion supports up to 25 files in one analysis.
           </div>
 
           <div
@@ -242,48 +417,48 @@ export default function UploadLanding() {
             <input
               ref={csvInputRef}
               type="file"
+              multiple
               accept=".csv,text/csv"
               style={{ display: "none" }}
               onChange={(event) => {
-                if (event.target.files?.[0]) {
-                  void handleCsvFile(event.target.files[0]);
-                }
+                void handleCsvFiles(event.target.files);
+                event.target.value = "";
               }}
             />
 
             {isAnalyzing ? (
               <div style={styles.analyzing}>
                 <div style={styles.spinner} />
-                Analyzing columns...
+                Analyzing first CSV...
               </div>
             ) : null}
 
-            {!isAnalyzing && csvFile ? (
-              <div style={styles.fileTag}>
-                <span style={styles.fileTagName}>CSV {csvFile.name}</span>
-                <button
-                  type="button"
-                  style={styles.removeBtn}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setCsvFile(null);
-                    setSchemaData(null);
-                    setError(null);
-                  }}
-                >
-                  x
-                </button>
-              </div>
-            ) : null}
-
-            {!isAnalyzing && !csvFile ? (
+            {!isAnalyzing && !csvFiles.length ? (
               <>
                 <div style={styles.dropIcon}>UPLOAD</div>
-                <div style={styles.dropText}>Drop CSV or click to upload</div>
-                <div style={styles.dropSub}>Any column naming / UTF-8</div>
+                <div style={styles.dropText}>Drop CSVs or click to upload</div>
+                <div style={styles.dropSub}>Up to 25 files / Any column naming / UTF-8</div>
+              </>
+            ) : null}
+
+            {!isAnalyzing && csvFiles.length > 0 ? (
+              <>
+                <div style={styles.dropIcon}>READY</div>
+                <div style={styles.dropText}>{csvFiles.length} CSV files selected</div>
+                <div style={styles.dropSub}>Click to replace selection</div>
               </>
             ) : null}
           </div>
+
+          {csvFiles.length > 0 ? (
+            <div style={styles.fileList}>
+              {csvFiles.map((file) => (
+                <div key={`${file.name}-${file.lastModified}`} style={styles.fileItem}>
+                  ◫ {file.name}
+                </div>
+              ))}
+            </div>
+          ) : null}
 
           {schemaData ? <SchemaPreview data={schemaData} /> : null}
         </div>
@@ -293,7 +468,7 @@ export default function UploadLanding() {
           <div style={styles.panelTitle}>Literature</div>
           <div style={styles.panelDesc}>
             Search published papers. Claims are extracted from every abstract
-            and cross-debated against your private data.
+            and cross-debated against every other source in the session.
           </div>
 
           <div style={styles.searchRow}>
@@ -341,6 +516,90 @@ export default function UploadLanding() {
               </button>
             ))}
           </div>
+        </div>
+      </div>
+
+      <div style={styles.secondaryGrid}>
+        <div style={styles.uploadCard}>
+          <div style={styles.cardTitle}>◈ PDF Documents</div>
+          <div style={styles.cardSub}>Research papers, reports, lab documents · up to 25 files</div>
+          <input
+            type="file"
+            multiple
+            accept=".pdf"
+            onChange={handlePdfChange}
+            style={{ display: "none" }}
+            ref={pdfInputRef}
+          />
+          <button
+            type="button"
+            onClick={() => pdfInputRef.current?.click()}
+            style={styles.uploadBtn}
+          >
+            Upload PDFs
+          </button>
+          {pdfFiles.length > 0 ? (
+            <div style={styles.fileList}>
+              {pdfFiles.map((file) => (
+                <div key={`${file.name}-${file.lastModified}`} style={styles.fileItem}>
+                  ◈ {file.name}
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+
+        <div style={styles.uploadCard}>
+          <div style={styles.cardTitle}>⬡ Web URLs</div>
+          <div style={styles.cardSub}>Papers, blog posts, clinical trial pages · up to 25 links</div>
+          <textarea
+            placeholder={"https://www.nejm.org/...\nhttps://clinicaltrials.gov/..."}
+            value={urlText}
+            onChange={(event) => setUrlText(event.target.value)}
+            style={styles.sourceTextarea}
+          />
+          <div style={styles.hint}>One URL per line</div>
+        </div>
+
+        <div style={styles.uploadCard}>
+          <div style={styles.cardTitle}>▶ YouTube Videos</div>
+          <div style={styles.cardSub}>Conference talks, lab presentations, lectures · up to 25 videos</div>
+          <textarea
+            placeholder={"https://youtube.com/watch?v=...\nhttps://youtu.be/..."}
+            value={youtubeText}
+            onChange={(event) => setYoutubeText(event.target.value)}
+            style={styles.sourceTextarea}
+          />
+          <div style={styles.hint}>One URL per line</div>
+        </div>
+
+        <div style={styles.uploadCard}>
+          <div style={styles.cardTitle}>◫ Excel / XLSX</div>
+          <div style={styles.cardSub}>Assay data, screening results, dose-response tables · up to 25 files</div>
+          <input
+            type="file"
+            multiple
+            accept=".xlsx,.xls"
+            onChange={handleXlsxChange}
+            style={{ display: "none" }}
+            ref={xlsxInputRef}
+          />
+          <button
+            type="button"
+            onClick={() => xlsxInputRef.current?.click()}
+            style={styles.uploadBtn}
+          >
+            Upload Excel
+          </button>
+          {xlsxFiles.length > 0 ? (
+            <div style={styles.fileList}>
+              {xlsxFiles.map((file) => (
+                <div key={`${file.name}-${file.lastModified}`} style={styles.fileItem}>
+                  ◫ {file.name}
+                </div>
+              ))}
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -519,6 +778,15 @@ const styles = {
     margin: "0 auto",
     background: "#1e2430",
   },
+  secondaryGrid: {
+    position: "relative",
+    zIndex: 1,
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+    gap: 16,
+    maxWidth: 960,
+    margin: "16px auto 0",
+  },
   panel: {
     background: "#0c0e12",
     padding: 32,
@@ -549,6 +817,33 @@ const styles = {
     color: "#6b7590",
     lineHeight: 1.6,
     marginBottom: 20,
+  },
+  uploadCard: {
+    background: "#0c0e12",
+    border: "1px solid #1e2430",
+    padding: 20,
+    minWidth: 0,
+  },
+  cardTitle: {
+    fontFamily: "'Syne', sans-serif",
+    fontSize: 16,
+    fontWeight: 700,
+    marginBottom: 8,
+  },
+  cardSub: {
+    fontSize: 11,
+    color: "#6b7590",
+    lineHeight: 1.6,
+    marginBottom: 14,
+  },
+  uploadBtn: {
+    background: "transparent",
+    border: "1px solid #1e2430",
+    cursor: "pointer",
+    color: "#e8eaf0",
+    fontFamily: "'DM Mono', monospace",
+    fontSize: 11,
+    padding: "10px 12px",
   },
   dropzone: {
     border: "1px dashed #1e2430",
@@ -585,30 +880,39 @@ const styles = {
     fontSize: 12,
     color: "#4d7cff",
   },
-  fileTag: {
+  fileList: {
     display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-    background: "rgba(77,124,255,0.08)",
-    border: "1px solid rgba(77,124,255,0.2)",
-    padding: "8px 12px",
-    fontSize: 11,
-    color: "#4d7cff",
+    flexDirection: "column",
+    gap: 6,
+    marginTop: 14,
   },
-  fileTagName: {
+  fileItem: {
+    background: "#050608",
+    border: "1px solid #1e2430",
+    padding: "8px 10px",
+    fontSize: 11,
+    color: "#6b7590",
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   },
-  removeBtn: {
-    background: "none",
-    border: "none",
-    cursor: "pointer",
-    color: "#ff3b5c",
-    fontSize: 16,
-    lineHeight: 1,
-    padding: 0,
+  hint: {
+    fontSize: 10,
+    color: "#3a4055",
+    marginTop: 8,
+  },
+  sourceTextarea: {
+    width: "100%",
+    minHeight: 80,
+    background: "#0a0c10",
+    border: "1px solid #1e2430",
+    color: "#e8eaf0",
+    fontFamily: "'DM Mono', monospace",
+    fontSize: 11,
+    padding: 8,
+    resize: "vertical",
+    outline: "none",
+    boxSizing: "border-box",
   },
   searchRow: {
     marginBottom: 12,
@@ -660,7 +964,7 @@ const styles = {
     alignItems: "center",
     gap: 12,
     maxWidth: 960,
-    margin: "0 auto",
+    margin: "16px auto 0",
     background: "#0c0e12",
     borderTop: "1px solid #1e2430",
     borderLeft: "1px solid #1e2430",

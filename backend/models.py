@@ -18,7 +18,15 @@ class TamarindVerdict(BaseModel):
 
 class ClaimNode(BaseModel):
     node_id: str
-    source_type: Literal["private_csv", "public_abstract"]
+    source_type: Literal[
+        "private_csv",
+        "public_abstract",
+        "tamarind_structural",
+        "pdf_document",
+        "web_url",
+        "youtube_video",
+    ]
+    source_id: Optional[str] = None
     claim_text: str
     subject_name: str
     subject_type: str

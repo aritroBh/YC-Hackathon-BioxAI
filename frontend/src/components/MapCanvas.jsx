@@ -29,23 +29,29 @@ function getZoomLevel(zoom) {
 
 function getNodeColor(node) {
   const friction = node.friction_score ?? 0;
+  let color = [0, 229, 160];
 
   if (friction >= 0.85) {
-    return [255, 48, 80];
+    color = [255, 48, 80];
+  } else if (friction >= 0.6) {
+    color = [255, 140, 0];
+  } else if (friction >= 0.3) {
+    color = [200, 220, 0];
+  } else if (node.polarity === "inhibits") {
+    color = [130, 80, 255];
+  } else if (node.polarity === "promotes") {
+    color = [0, 200, 255];
   }
-  if (friction >= 0.6) {
-    return [255, 140, 0];
+
+  if (["pdf_document", "web_url", "youtube_video"].includes(node.source_type)) {
+    return [
+      clamp(Math.round((color[0] * 0.84) + 13), 0, 255),
+      clamp(Math.round((color[1] * 0.9) + 11), 0, 255),
+      clamp(Math.round((color[2] * 0.92) + 24), 0, 255),
+    ];
   }
-  if (friction >= 0.3) {
-    return [200, 220, 0];
-  }
-  if (node.polarity === "inhibits") {
-    return [130, 80, 255];
-  }
-  if (node.polarity === "promotes") {
-    return [0, 200, 255];
-  }
-  return [0, 229, 160];
+
+  return color;
 }
 
 function getBaseRadius(node, zoomLevel) {
@@ -53,13 +59,28 @@ function getBaseRadius(node, zoomLevel) {
     case "galaxy":
       return 2;
     case "cluster":
-      return node.source_type === "private_csv" ? 4 : 3;
+      return node.source_type !== "public_abstract" ? 4 : 3;
     case "node":
-      return node.source_type === "private_csv" ? 5.5 : 4.5;
+      return node.source_type !== "public_abstract" ? 5.5 : 4.5;
     case "detail":
-      return node.source_type === "private_csv" ? 7 : 6;
+      return node.source_type !== "public_abstract" ? 7 : 6;
     default:
       return 3;
+  }
+}
+
+function getSourceMeta(node) {
+  switch (node.source_type) {
+    case "private_csv":
+      return { label: "Private CSV", color: "#4d7cff" };
+    case "pdf_document":
+      return { label: "PDF Document", color: "#7aa7ff" };
+    case "web_url":
+      return { label: "Web URL", color: "#7aa7ff" };
+    case "youtube_video":
+      return { label: "YouTube", color: "#7aa7ff" };
+    default:
+      return { label: "Literature", color: "#ffb340" };
   }
 }
 
@@ -588,7 +609,7 @@ function drawNode(ctx, node, sx, sy, zoom, isSelected, isHovered, viewMode) {
     ctx.stroke();
   }
 
-  if (node.source_type === "private_csv" && zoomLevel !== "galaxy") {
+  if (node.source_type !== "public_abstract" && zoomLevel !== "galaxy") {
     const size = baseRadius * 1.7;
     ctx.strokeStyle = `rgba(${red},${green},${blue},0.7)`;
     ctx.lineWidth = 0.8;
@@ -1639,11 +1660,11 @@ export default function MapCanvas({
               fontSize: 9,
               letterSpacing: 2,
               textTransform: "uppercase",
-              color: hoveredNode.source_type === "private_csv" ? "#4d7cff" : "#ffb340",
+              color: getSourceMeta(hoveredNode).color,
               marginBottom: 8,
             }}
           >
-            {hoveredNode.source_type === "private_csv" ? "Private CSV" : "Literature"}
+            {getSourceMeta(hoveredNode).label}
           </div>
           <div style={{ fontSize: 12, lineHeight: 1.5, color: "#e8eaf0", marginBottom: 10 }}>
             {stripHtml(hoveredNode.claim_text).substring(0, 160)}

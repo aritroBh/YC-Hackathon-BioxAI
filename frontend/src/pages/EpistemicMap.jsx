@@ -374,6 +374,19 @@ export default function EpistemicMap() {
               color: "#6b7590",
             }}
           >
+            <span style={{ width: 8, textAlign: "center", flexShrink: 0 }}>◫</span>
+            Excel Data
+          </div>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "3px 0",
+              fontSize: 11,
+              color: "#6b7590",
+            }}
+          >
             <div
               style={{
                 width: 8,
@@ -385,6 +398,26 @@ export default function EpistemicMap() {
             />
             Literature
           </div>
+          {[
+            ["◈", "PDF Document"],
+            ["⬡", "Web URL"],
+            ["▶", "YouTube"],
+          ].map(([icon, label]) => (
+            <div
+              key={label}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "3px 0",
+                fontSize: 11,
+                color: "#6b7590",
+              }}
+            >
+              <span style={{ width: 8, textAlign: "center", flexShrink: 0 }}>{icon}</span>
+              {label}
+            </div>
+          ))}
         </div>
 
         <div style={{ padding: "14px 16px" }}>

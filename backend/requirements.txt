@@ -3,9 +3,15 @@ uvicorn
 anthropic
 openai
 httpx
+beautifulsoup4
 python-multipart
 umap-learn
 numpy
+pandas
+openpyxl
+pymupdf
 scikit-learn
 pydantic
 python-dotenv
+youtube-transcript-api
+xlrd
