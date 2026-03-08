@@ -115,10 +115,10 @@ export default function EpistemicMap() {
       || node?.debate_state === "contradiction"
     ) {
       window.dispatchEvent(new CustomEvent("dialectic:select-experiment-node", {
-        detail: { node },
+        detail: { node, allNodes: nodes },
       }));
     }
-  }, []);
+  }, [nodes]);
 
   const handleMultiSelect = useCallback((ids) => {
     if (ids.length === 0) {

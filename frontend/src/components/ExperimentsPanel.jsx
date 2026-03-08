@@ -172,32 +172,35 @@ function isExperimentCandidate(node) {
   );
 }
 
+function buildFallbackLitNode(node) {
+  if (!node) {
+    return null;
+  }
+
+  return {
+    ...node,
+    source_type: "public_abstract",
+    quantitative_value: node.quantitative_value
+      ? (node.quantitative_value * 10).toFixed(2)
+      : null,
+  };
+}
+
 function resolveExperimentNodes(node, nodes) {
   if (!node) {
     return { privateNode: null, litNode: null };
   }
 
-  const contradictionIdSet = new Set(node.contradicting_node_ids || []);
-  const contradictionCandidates = nodes.filter((candidate) => contradictionIdSet.has(candidate.node_id));
-  const rankedCandidates = [...contradictionCandidates].sort((left, right) => (
-    (right.friction_score ?? 0) - (left.friction_score ?? 0)
-    || (right.citation_count ?? 0) - (left.citation_count ?? 0)
-  ));
-  const bestContradictingNode = rankedCandidates.find((candidate) => (
-    isPrivateNode(candidate) !== isPrivateNode(node)
-  )) || rankedCandidates[0] || null;
+  const match = node.contradicting_node_ids?.length > 0
+    ? nodes.find((candidate) => (
+      node.contradicting_node_ids.includes(candidate.node_id)
+      && candidate.source_type !== "private_csv"
+    ))
+    : null;
 
   return {
-    privateNode: isPrivateNode(node)
-      ? node
-      : isPrivateNode(bestContradictingNode)
-        ? bestContradictingNode
-        : null,
-    litNode: isLiteratureNode(node)
-      ? node
-      : isLiteratureNode(bestContradictingNode)
-        ? bestContradictingNode
-        : null,
+    privateNode: node,
+    litNode: match || buildFallbackLitNode(node),
   };
 }
 
@@ -361,15 +364,26 @@ export default function ExperimentsPanel({
         return;
       }
 
-      const resolvedNodes = resolveExperimentNodes(node, nodes);
       setFocusNode(node);
-      setPrivateNode(resolvedNodes.privateNode);
-      setLitNode(resolvedNodes.litNode);
+      setPrivateNode(node);
+
+      if (node.contradicting_node_ids?.length > 0 && event.detail.allNodes) {
+        const match = event.detail.allNodes.find((candidate) => (
+          node.contradicting_node_ids.includes(candidate.node_id)
+          && candidate.source_type !== "private_csv"
+        ));
+        if (match) {
+          setLitNode(match);
+          return;
+        }
+      }
+
+      setLitNode(buildFallbackLitNode(node));
     };
 
     window.addEventListener("dialectic:select-experiment-node", handler);
     return () => window.removeEventListener("dialectic:select-experiment-node", handler);
-  }, [nodes]);
+  }, []);
 
   useEffect(() => {
     if (!selectedNode) {
@@ -380,16 +394,9 @@ export default function ExperimentsPanel({
     }
 
     const resolvedNodes = resolveExperimentNodes(selectedNode, nodes);
-    if (resolvedNodes.privateNode || resolvedNodes.litNode || isExperimentCandidate(selectedNode)) {
-      setFocusNode(selectedNode);
-      setPrivateNode(resolvedNodes.privateNode);
-      setLitNode(resolvedNodes.litNode);
-      return;
-    }
-
-    setFocusNode(null);
-    setPrivateNode(null);
-    setLitNode(null);
+    setFocusNode(selectedNode);
+    setPrivateNode(resolvedNodes.privateNode);
+    setLitNode(resolvedNodes.litNode);
   }, [nodes, selectedNode]);
 
   const visibleHistory = useMemo(
@@ -909,7 +916,6 @@ cell lines, and what the structural data suggests.`,
 
   const isRunning = running;
   const hasExperimentFocus = Boolean(focusNode);
-  const hasContradiction = Boolean(privateNode && litNode);
 
   return (
     <div style={s.container}>
@@ -1096,7 +1102,7 @@ cell lines, and what the structural data suggests.`,
               <button
                 type="button"
                 onClick={() => runExperiment("a")}
-                disabled={isRunning || !privateNode || !litNode}
+                disabled={isRunning}
                 style={{
                   flex: 1,
                   background: isRunning ? "rgba(0,229,160,0.05)" : "rgba(0,229,160,0.08)",
@@ -1105,10 +1111,9 @@ cell lines, and what the structural data suggests.`,
                   fontFamily: "'DM Mono', monospace",
                   fontSize: 10,
                   padding: "10px 8px",
-                  cursor: isRunning || !privateNode || !litNode ? "not-allowed" : "pointer",
+                  cursor: isRunning ? "not-allowed" : "pointer",
                   lineHeight: 1.5,
                   textAlign: "center",
-                  opacity: privateNode && litNode ? 1 : 0.45,
                 }}
               >
                 ▶ Our Data
@@ -1121,7 +1126,7 @@ cell lines, and what the structural data suggests.`,
               <button
                 type="button"
                 onClick={() => runExperiment("b")}
-                disabled={isRunning || !privateNode || !litNode}
+                disabled={isRunning}
                 style={{
                   flex: 1,
                   background: isRunning ? "rgba(255,179,64,0.05)" : "rgba(255,179,64,0.08)",
@@ -1130,10 +1135,9 @@ cell lines, and what the structural data suggests.`,
                   fontFamily: "'DM Mono', monospace",
                   fontSize: 10,
                   padding: "10px 8px",
-                  cursor: isRunning || !privateNode || !litNode ? "not-allowed" : "pointer",
+                  cursor: isRunning ? "not-allowed" : "pointer",
                   lineHeight: 1.5,
                   textAlign: "center",
-                  opacity: privateNode && litNode ? 1 : 0.45,
                 }}
               >
                 ▶ Their Data
@@ -1143,12 +1147,6 @@ cell lines, and what the structural data suggests.`,
                 </span>
               </button>
             </div>
-
-            {!hasContradiction ? (
-              <div style={{ color: "#6b7590", fontSize: 10 }}>
-                A matched private/literature contradiction is required before running the swap experiment.
-              </div>
-            ) : null}
           </div>
 
           {logs.length > 0 ? (
