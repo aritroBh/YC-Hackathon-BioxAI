@@ -28,7 +28,7 @@ export default function EpistemicMap() {
   const [searchQuery, setSearchQuery] = useState("");
   const [viewMode, setViewMode] = useState("2D");
   const [scoutHighlightIds, setScoutHighlightIds] = useState([]);
-  const [scoutHighlightColor, setScoutHighlightColor] = useState("#ffb340");
+  const [scoutHighlightColor, setScoutHighlightColor] = useState("#ffff00");
   const mapCanvasRef = useRef(null);
   const [viewportWidth, setViewportWidth] = useState(
     typeof window !== "undefined" ? window.innerWidth : 1440,
@@ -66,10 +66,38 @@ export default function EpistemicMap() {
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
+  useEffect(() => {
+    const handler = (event) => {
+      if (event.detail?.tab) {
+        setRightTab(event.detail.tab);
+      }
+    };
+
+    window.addEventListener("dialectic:open-tab", handler);
+    return () => window.removeEventListener("dialectic:open-tab", handler);
+  }, []);
+
   const nodeMap = useMemo(
     () => Object.fromEntries(nodes.map((node) => [node.node_id, node])),
     [nodes],
   );
+
+  const resolveScoutNodeIds = useCallback((nodeIds) => [...new Set(
+    (nodeIds || []).flatMap((nodeId) => {
+      const normalizedId = String(nodeId ?? "").trim();
+      if (!normalizedId) {
+        return [];
+      }
+
+      const exactMatch = nodes.find((node) => node.node_id === normalizedId);
+      if (exactMatch) {
+        return [exactMatch.node_id];
+      }
+
+      const prefixMatch = nodes.find((node) => node.node_id?.startsWith(normalizedId));
+      return prefixMatch ? [prefixMatch.node_id] : [];
+    }),
+  )], [nodes]);
 
   const handleSelectNode = useCallback((node) => {
     setInspectedNode(node);
@@ -149,36 +177,37 @@ export default function EpistemicMap() {
   }, [activeBagId]);
 
   const handleScoutHighlight = useCallback((nodeIds, color) => {
-    setScoutHighlightIds([...new Set(nodeIds || [])]);
-    setScoutHighlightColor(color || "#ffb340");
-  }, []);
+    setScoutHighlightIds(resolveScoutNodeIds(nodeIds));
+    setScoutHighlightColor(color || "#ffff00");
+  }, [resolveScoutNodeIds]);
 
   const handleScoutCreateBag = useCallback((name, nodeIds) => {
-    const bagNodeIds = nodes
-      .filter((node) => nodeIds?.includes(node.node_id))
-      .map((node) => node.node_id);
-
-    if (bagNodeIds.length > 0) {
-      handleCreateBag(bagNodeIds, name);
+    const resolvedNodeIds = resolveScoutNodeIds(nodeIds);
+    const bagNodes = nodes.filter((node) => resolvedNodeIds.includes(node.node_id));
+    if (bagNodes.length === 0) {
+      return;
     }
-  }, [handleCreateBag, nodes]);
+    handleCreateBag(bagNodes.map((node) => node.node_id), name);
+  }, [handleCreateBag, nodes, resolveScoutNodeIds]);
 
   const handleScoutRunDiffDock = useCallback((nodeId) => {
-    const node = nodes.find((candidate) => candidate.node_id === nodeId);
+    const resolvedNodeId = resolveScoutNodeIds([nodeId])[0];
+    const node = nodes.find((candidate) => candidate.node_id === resolvedNodeId);
     if (node) {
       setInspectedNode(node);
-      setSelectedIds([nodeId]);
+      setSelectedIds([node.node_id]);
       setRightTab("experiments");
     }
-  }, [nodes]);
+  }, [nodes, resolveScoutNodeIds]);
 
   const handleScoutSelectNode = useCallback((nodeId) => {
-    const node = nodes.find((candidate) => candidate.node_id === nodeId);
+    const resolvedNodeId = resolveScoutNodeIds([nodeId])[0];
+    const node = nodes.find((candidate) => candidate.node_id === resolvedNodeId);
     if (node) {
-      setSelectedIds([nodeId]);
+      setSelectedIds([node.node_id]);
       setInspectedNode(node);
     }
-  }, [nodes]);
+  }, [nodes, resolveScoutNodeIds]);
 
   const activeBag = useMemo(
     () => bags.find((bag) => bag.id === activeBagId) ?? null,

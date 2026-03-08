@@ -632,18 +632,18 @@ function drawNode(ctx, node, sx, sy, zoom, isSelected, isHovered, viewMode, isSc
 
   if (isScoutFlagged) {
     ctx.beginPath();
-    ctx.arc(drawX, drawY, baseRadius + 8, 0, Math.PI * 2);
+    ctx.arc(drawX, drawY, baseRadius + 10, 0, Math.PI * 2);
     ctx.strokeStyle = scoutHighlightColor;
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([3, 3]);
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([4, 2]);
     ctx.stroke();
     ctx.setLineDash([]);
 
     ctx.fillStyle = scoutHighlightColor;
-    ctx.font = "7px 'DM Mono', monospace";
+    ctx.font = "bold 9px 'DM Mono'";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText("◈", drawX, drawY - baseRadius - 6);
+    ctx.fillText("◈", drawX, drawY - baseRadius - 8);
   }
 
   if (isHovered && !isSelected) {
@@ -717,7 +717,7 @@ const MapCanvas = forwardRef(function MapCanvas({
   selectedIds = [],
   viewMode = "2D",
   scoutHighlightIds = [],
-  scoutHighlightColor = "#ffb340",
+  scoutHighlightColor = "#ffff00",
   onSelectNode,
   onMultiSelect,
   onHoverNode,

@@ -215,7 +215,7 @@ export default function ScoutAgent({
     setStatus("scanning");
     setExpandedFinding(null);
     setVisionSummary("");
-    onHighlightNodes?.([], "#ffb340");
+    onHighlightNodes?.([], "#ffff00");
     addLog("► Scout scan initiated...");
 
     const nodeSlim = nodes
@@ -318,7 +318,7 @@ export default function ScoutAgent({
       setScanCount((count) => count + 1);
 
       if (flaggedIds.length > 0 && onHighlightNodes) {
-        onHighlightNodes(flaggedIds, "#ffb340");
+        onHighlightNodes(flaggedIds, "#ffff00");
         addLog(`► Highlighted ${flaggedIds.length} nodes on map.`);
       }
 
@@ -905,6 +905,9 @@ export default function ScoutAgent({
                         if (finding.node_ids?.[0] && onSelectNode) {
                           onSelectNode(finding.node_ids[0]);
                         }
+                        window.dispatchEvent(new CustomEvent("dialectic:open-tab", {
+                          detail: { tab: "experiments" },
+                        }));
                       }}
                       style={{
                         background: "transparent",
@@ -925,7 +928,7 @@ export default function ScoutAgent({
                       onClick={(event) => {
                         event.stopPropagation();
                         if (finding.node_ids?.length > 0 && onHighlightNodes) {
-                          onHighlightNodes(finding.node_ids, severityColor[finding.severity] || "#ffb340");
+                          onHighlightNodes(finding.node_ids, "#ffff00");
                         }
                       }}
                       style={{
