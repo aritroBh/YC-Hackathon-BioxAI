@@ -178,6 +178,19 @@ function formatMeasurement(node) {
   return `${node.quantitative_value}${node.quantitative_unit || "nM"}`;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function formatFixed(value, digits = 2) {
+  return Number.isFinite(value) ? value.toFixed(digits) : "—";
+}
+
 function buildFallbackSummary(expResults, privateNode, litNode) {
   const scoreA = expResults?.direction_a?.diffdock_score;
   const scoreB = expResults?.direction_b?.diffdock_score;
@@ -295,6 +308,10 @@ export default function ExperimentsPanel({
   const [results, setResults] = useState(null);
   const [summary, setSummary] = useState("");
   const [summaryLoading, setSummaryLoading] = useState(false);
+  const [nextSteps, setNextSteps] = useState([]);
+  const [nextStepsLoading, setNextStepsLoading] = useState(false);
+  const [history, setHistory] = useState([]);
+  const [showHistory, setShowHistory] = useState(false);
   const logRef = useRef(null);
 
   const contradictionCandidates = useMemo(
@@ -326,6 +343,11 @@ export default function ExperimentsPanel({
       ? contradictingNode
       : null;
 
+  const visibleHistory = useMemo(
+    () => history.filter((run) => run.nodeAId === privateNode?.node_id && run.nodeBId === litNode?.node_id),
+    [history, litNode?.node_id, privateNode?.node_id],
+  );
+
   const addLog = (message) => {
     const time = new Date().toISOString().slice(14, 19);
     setLogs((previous) => [...previous, `[${time}] ${message}`]);
@@ -343,6 +365,8 @@ export default function ExperimentsPanel({
     setResults(null);
     setSummary("");
     setSummaryLoading(false);
+    setNextSteps([]);
+    setNextStepsLoading(false);
   }, [selectedNode?.node_id, privateNode?.node_id, litNode?.node_id]);
 
   const generateSummary = async (expResults) => {
@@ -462,6 +486,228 @@ Write in the style of a methods/results section. Be specific about compound name
     }
   };
 
+  const generateNextSteps = async (expResults) => {
+    if (!privateNode || !litNode) {
+      return;
+    }
+
+    if (!ANTHROPIC_API_KEY) {
+      setNextSteps([]);
+      return;
+    }
+
+    setNextStepsLoading(true);
+    setNextSteps([]);
+
+    try {
+      const response = await fetch(ANTHROPIC_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "anthropic-version": "2023-06-01",
+          "x-api-key": ANTHROPIC_API_KEY,
+        },
+        body: JSON.stringify({
+          model: ANTHROPIC_MODEL,
+          max_tokens: 1000,
+          messages: [{
+            role: "user",
+            content: `You are a computational biology expert.
+Given these DiffDock experiment results:
+${JSON.stringify(expResults, null, 2)}
+
+Private node: ${privateNode?.subject_name}, IC50=${privateNode?.quantitative_value}${privateNode?.quantitative_unit}, cell_line=${privateNode?.cell_line}
+Literature node: ${litNode?.subject_name}, IC50=${litNode?.quantitative_value}${litNode?.quantitative_unit}
+
+Return ONLY valid JSON — no preamble, no markdown, no backticks:
+{
+  "recommendations": [
+    {
+      "title": "short action title (max 8 words)",
+      "rationale": "one sentence why this experiment matters",
+      "experiment_type": "docking" | "assay" | "literature",
+      "prefill": {
+        "compound": "compound name to test",
+        "cell_line": "suggested cell line",
+        "direction": "a" | "b" | "both"
+      }
+    }
+  ]
+}
+Provide exactly 3 recommendations. Be specific about compound names,
+cell lines, and what the structural data suggests.`,
+          }],
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+
+      const data = await response.json();
+      const text = data.content?.[0]?.text || "[]";
+      const clean = text.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(clean);
+      setNextSteps(Array.isArray(parsed.recommendations) ? parsed.recommendations.slice(0, 3) : []);
+    } catch (error) {
+      setNextSteps([]);
+      addLog(`Recommendations unavailable: ${error.message || "Claude unavailable."}`);
+    } finally {
+      setNextStepsLoading(false);
+    }
+  };
+
+  const generateReport = () => {
+    if (!results) {
+      return;
+    }
+
+    const win = window.open("", "_blank");
+    if (!win) {
+      addLog("Report window blocked by the browser.");
+      return;
+    }
+
+    const reportHtml = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Dialectic Experiment Report</title>
+        <style>
+          body {
+            font-family: 'Courier New', monospace;
+            max-width: 800px; margin: 40px auto;
+            color: #1a1a2e; font-size: 12px; line-height: 1.6;
+          }
+          h1 { font-size: 20px; border-bottom: 2px solid #1a1a2e; padding-bottom: 8px; }
+          h2 { font-size: 14px; color: #333; margin-top: 24px; }
+          .badge {
+            display: inline-block; padding: 2px 8px;
+            border: 1px solid #333; font-size: 10px;
+            margin-right: 6px; text-transform: uppercase;
+          }
+          .score-box {
+            background: #f5f5f5; border: 1px solid #ddd;
+            padding: 12px; margin: 8px 0;
+          }
+          .warning {
+            border-left: 3px solid #cc0000;
+            padding-left: 10px; color: #cc0000;
+          }
+          table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+          td, th { border: 1px solid #ddd; padding: 6px 10px; font-size: 11px; }
+          th { background: #f0f0f0; }
+          .footer { margin-top: 40px; font-size: 10px; color: #999; border-top: 1px solid #ddd; padding-top: 12px; }
+        </style>
+      </head>
+      <body>
+        <h1>⬡ Dialectic — Experiment Report</h1>
+        <p>Generated: ${escapeHtml(new Date().toLocaleString())} · Session: ${escapeHtml(sessionId)}</p>
+
+        <h2>Contradiction Summary</h2>
+        <div class="warning">
+          <strong>${escapeHtml(privateNode?.subject_name || "Private compound")}</strong>
+          reports IC50 = ${escapeHtml(privateNode?.quantitative_value)}${escapeHtml(privateNode?.quantitative_unit || "nM")}
+          (private assay, ${escapeHtml(privateNode?.cell_line || "unknown cell line")})
+          vs published IC50 = ${escapeHtml(litNode?.quantitative_value)}${escapeHtml(litNode?.quantitative_unit || "nM")}
+          (${escapeHtml(litNode?.citation_count || "?")} citations).
+          Friction score: ${escapeHtml(privateNode?.friction_score?.toFixed(2) || "0.85")} (CRITICAL).
+        </div>
+
+        <h2>DiffDock Results</h2>
+        <table>
+          <tr>
+            <th>Direction</th>
+            <th>Compound</th>
+            <th>Conditions</th>
+            <th>DiffDock Score</th>
+            <th>Est. IC50 (nM)</th>
+            <th>Verdict</th>
+          </tr>
+          ${results.direction_a ? `<tr>
+            <td>My Data → Their Protocol</td>
+            <td>${escapeHtml(results.direction_a.compound)}</td>
+            <td>${escapeHtml(results.direction_a.conditions)}</td>
+            <td>${escapeHtml(formatFixed(results.direction_a.diffdock_score, 3))}</td>
+            <td>${escapeHtml(results.direction_a.estimated_ic50_nm)}</td>
+            <td>${escapeHtml(results.direction_a.verdict)}</td>
+          </tr>` : ""}
+          ${results.direction_b ? `<tr>
+            <td>Their Data → My Protocol</td>
+            <td>${escapeHtml(results.direction_b.compound)}</td>
+            <td>${escapeHtml(results.direction_b.conditions)}</td>
+            <td>${escapeHtml(formatFixed(results.direction_b.diffdock_score, 3))}</td>
+            <td>${escapeHtml(results.direction_b.estimated_ic50_nm)}</td>
+            <td>${escapeHtml(results.direction_b.verdict)}</td>
+          </tr>` : ""}
+        </table>
+
+        <h2>Structural Interpretation</h2>
+        <p>${escapeHtml(summary || "Not generated.")}</p>
+
+        ${nextSteps.length > 0 ? `
+        <h2>Recommended Next Experiments</h2>
+        <ol>
+          ${nextSteps.map((step) => `
+            <li>
+              <strong>${escapeHtml(step.title)}</strong><br/>
+              ${escapeHtml(step.rationale)}<br/>
+              <em>Suggested: ${escapeHtml(step.prefill?.compound)} in ${escapeHtml(step.prefill?.cell_line)}</em>
+            </li>
+          `).join("")}
+        </ol>` : ""}
+
+        <h2>BioRender Pathway Visualization</h2>
+        <p>
+          View the KRAS signaling pathway relevant to this contradiction in BioRender:<br/>
+          <a href="https://app.biorender.com/biorender-templates?search=KRAS" target="_blank">
+            https://app.biorender.com/biorender-templates?search=KRAS
+          </a>
+        </p>
+
+        <div class="footer">
+          Dialectic · Bio x AI Hackathon · YC HQ · ${escapeHtml(new Date().toLocaleDateString())}
+          · Powered by Claude (Anthropic) + DiffDock (Tamarind Bio)
+        </div>
+      </body>
+      </html>
+    `;
+
+    win.document.write(reportHtml);
+    win.document.close();
+    win.print();
+  };
+
+  const restoreHistoryRun = (run) => {
+    setResults(run.results);
+    setSummary("");
+    setSummaryLoading(false);
+    setNextSteps([]);
+    setNextStepsLoading(false);
+  };
+
+  const finalizeExperiment = async (expResults, direction) => {
+    const frictionTimeline = expResults.friction_timeline || [];
+
+    setResults(expResults);
+    addLog("✓ Experiment complete.");
+    await generateSummary(expResults);
+    await generateNextSteps(expResults);
+    setHistory((previous) => [...previous, {
+      id: Date.now(),
+      timestamp: new Date().toLocaleTimeString(),
+      nodeAId: privateNode?.node_id,
+      nodeBId: litNode?.node_id,
+      nodeA: privateNode?.subject_name,
+      nodeB: litNode?.subject_name,
+      direction,
+      scoreA: expResults.direction_a?.diffdock_score,
+      scoreB: expResults.direction_b?.diffdock_score,
+      frictionFinal: frictionTimeline[frictionTimeline.length - 1],
+      results: expResults,
+    }]);
+  };
+
   const runExperiment = async (direction) => {
     if (!privateNode || !litNode || running) {
       return;
@@ -471,6 +717,8 @@ Write in the style of a methods/results section. Be specific about compound name
     setResults(null);
     setSummary("");
     setSummaryLoading(false);
+    setNextSteps([]);
+    setNextStepsLoading(false);
     setLogs([]);
 
     try {
@@ -497,7 +745,7 @@ Write in the style of a methods/results section. Be specific about compound name
       const decoder = new TextDecoder();
       let buffer = "";
 
-      const processBlock = (block) => {
+      const processBlock = async (block) => {
         const dataLines = block
           .split("\n")
           .map((line) => line.trim())
@@ -513,9 +761,7 @@ Write in the style of a methods/results section. Be specific about compound name
           addLog(evt.message);
         }
         if (evt.event === "complete") {
-          setResults(evt.results);
-          addLog("✓ Experiment complete.");
-          void generateSummary(evt.results);
+          await finalizeExperiment(evt.results, direction);
         }
         if (evt.event === "error") {
           addLog(`✗ Error: ${evt.message}`);
@@ -531,18 +777,18 @@ Write in the style of a methods/results section. Be specific about compound name
         buffer += decoder.decode(value, { stream: true });
         const blocks = buffer.split("\n\n");
         buffer = blocks.pop() || "";
-        blocks.forEach((block) => {
+        for (const block of blocks) {
           try {
-            processBlock(block);
+            await processBlock(block);
           } catch {
             // Ignore malformed SSE chunks and continue.
           }
-        });
+        }
       }
 
       buffer += decoder.decode();
       if (buffer.trim()) {
-        processBlock(buffer);
+        await processBlock(buffer);
       }
     } catch (error) {
       addLog(`✗ Request failed: ${error.message}`);
@@ -625,6 +871,106 @@ Write in the style of a methods/results section. Be specific about compound name
         </div>
       ) : (
         <>
+          {visibleHistory.length > 0 ? (
+            <div style={{ marginBottom: 12 }}>
+              <button
+                type="button"
+                onClick={() => setShowHistory((current) => !current)}
+                style={{
+                  width: "100%",
+                  background: "transparent",
+                  border: "1px solid #1e2430",
+                  color: "#6b7590",
+                  fontFamily: "'DM Mono',monospace",
+                  fontSize: 10,
+                  padding: "6px 10px",
+                  cursor: "pointer",
+                  textAlign: "left",
+                  marginBottom: showHistory ? 8 : 0,
+                }}
+              >
+                ◈ Experiment History ({visibleHistory.length} runs)
+                {showHistory ? " ▲" : " ▼"}
+              </button>
+
+              {showHistory ? visibleHistory.map((run, index) => (
+                <div
+                  key={run.id}
+                  onClick={() => restoreHistoryRun(run)}
+                  style={{
+                    background: "#0c0e12",
+                    border: "1px solid #1e2430",
+                    padding: 8,
+                    marginBottom: 4,
+                    cursor: "pointer",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                  }}
+                >
+                  <div>
+                    <div style={{ color: "#e8eaf0", fontSize: 10 }}>
+                      Run {index + 1} · {run.nodeA} vs {run.nodeB}
+                    </div>
+                    <div style={{ color: "#6b7590", fontSize: 9, marginTop: 2 }}>
+                      {run.timestamp} · friction: {formatFixed(run.frictionFinal)}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontSize: 9, color: "#ffb340" }}>
+                      A: {formatFixed(run.scoreA)}
+                    </div>
+                    <div style={{ fontSize: 9, color: "#ff8c00" }}>
+                      B: {formatFixed(run.scoreB)}
+                    </div>
+                  </div>
+                </div>
+              )) : null}
+
+              {visibleHistory.length >= 2 && showHistory ? (
+                <div
+                  style={{
+                    background: "#0c0e12",
+                    border: "1px solid #1e2430",
+                    padding: 8,
+                    marginTop: 4,
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: 9,
+                      color: "#6b7590",
+                      letterSpacing: 1.5,
+                      marginBottom: 6,
+                    }}
+                  >
+                    SCORE TREND
+                  </div>
+                  <ResponsiveContainer width="100%" height={60}>
+                    <LineChart data={visibleHistory.map((run, index) => ({
+                      run: `Run ${index + 1}`,
+                      scoreA: run.scoreA,
+                      scoreB: run.scoreB,
+                    }))}
+                    >
+                      <XAxis dataKey="run" tick={{ fontSize: 7, fill: "#6b7590" }} />
+                      <YAxis tick={{ fontSize: 7, fill: "#6b7590" }} />
+                      <Tooltip
+                        contentStyle={{
+                          background: "#0c0e12",
+                          border: "1px solid #1e2430",
+                          fontSize: 9,
+                        }}
+                      />
+                      <Line type="monotone" dataKey="scoreA" stroke="#ffb340" dot={false} strokeWidth={1.5} />
+                      <Line type="monotone" dataKey="scoreB" stroke="#ff8c00" dot={false} strokeWidth={1.5} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
           <div style={s.card}>
             <div style={{ fontSize: 9, color: "#6b7590", letterSpacing: 1.5, marginBottom: 8 }}>
               EXPERIMENT SETUP
@@ -817,9 +1163,127 @@ Write in the style of a methods/results section. Be specific about compound name
                 ) : null}
               </div>
 
+              <div
+                style={{
+                  background: "#0c0e12",
+                  border: "1px solid #1e2430",
+                  padding: 12,
+                  marginBottom: 12,
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 9,
+                    color: "#00e5a0",
+                    letterSpacing: 1.5,
+                    marginBottom: 10,
+                  }}
+                >
+                  ▶ RECOMMENDED NEXT EXPERIMENTS
+                </div>
+
+                {nextStepsLoading ? (
+                  <div style={{ color: "#6b7590", fontSize: 10 }}>
+                    Analyzing results...
+                  </div>
+                ) : null}
+
+                {nextSteps.map((step, index) => (
+                  <div
+                    key={`${step.title || "recommendation"}-${index}`}
+                    style={{
+                      background: "#080a0e",
+                      border: "1px solid #1e2430",
+                      padding: 10,
+                      marginBottom: 8,
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "flex-start",
+                      gap: 8,
+                    }}
+                  >
+                    <div style={{ flex: 1 }}>
+                      <div style={{ color: "#e8eaf0", fontSize: 11, marginBottom: 3 }}>
+                        {index + 1}. {step.title}
+                      </div>
+                      <div style={{ color: "#6b7590", fontSize: 10, lineHeight: 1.5 }}>
+                        {step.rationale}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 9,
+                          color: "#3a4055",
+                          marginTop: 4,
+                        }}
+                      >
+                        {step.prefill?.compound} · {step.prefill?.cell_line}
+                      </div>
+                    </div>
+                    {step.experiment_type === "docking" ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          runExperiment(step.prefill?.direction || "both");
+                        }}
+                        style={{
+                          background: "transparent",
+                          border: "1px solid #00e5a0",
+                          color: "#00e5a0",
+                          fontFamily: "'DM Mono',monospace",
+                          fontSize: 10,
+                          padding: "4px 10px",
+                          cursor: "pointer",
+                          whiteSpace: "nowrap",
+                          flexShrink: 0,
+                        }}
+                      >
+                        Run This →
+                      </button>
+                    ) : null}
+                    {step.experiment_type === "literature" ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          window.dispatchEvent(new CustomEvent("dialectic:oracle-query", {
+                            detail: { query: `What does the literature say about ${step.prefill?.compound} in ${step.prefill?.cell_line}?` },
+                          }));
+                        }}
+                        style={{
+                          background: "transparent",
+                          border: "1px solid #4d7cff",
+                          color: "#4d7cff",
+                          fontFamily: "'DM Mono',monospace",
+                          fontSize: 10,
+                          padding: "4px 10px",
+                          cursor: "pointer",
+                          whiteSpace: "nowrap",
+                          flexShrink: 0,
+                        }}
+                      >
+                        Ask Oracle →
+                      </button>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+
               <div style={s.exportRow}>
-                <button type="button" style={s.exportBtn} onClick={() => window.print()}>
-                  ◈ Export PDF
+                <button type="button" style={s.exportBtn} onClick={() => generateReport()}>
+                  ◈ Export Report
+                </button>
+                <button
+                  type="button"
+                  style={{
+                    ...s.exportBtn,
+                    borderColor: "rgba(0,180,120,0.4)",
+                    color: "#00b478",
+                  }}
+                  onClick={() => window.open(
+                    "https://app.biorender.com/biorender-templates?search=KRAS+signaling",
+                    "_blank",
+                  )}
+                >
+                  🎨 BioRender Pathway
                 </button>
                 <button
                   type="button"
